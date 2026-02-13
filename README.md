@@ -1,5 +1,11 @@
 # Overlap Tracer
 
+[![CI](https://github.com/overlapcode/overlap-tracer/actions/workflows/ci.yml/badge.svg)](https://github.com/overlapcode/overlap-tracer/actions/workflows/ci.yml)
+[![Release](https://github.com/overlapcode/overlap-tracer/actions/workflows/release.yml/badge.svg)](https://github.com/overlapcode/overlap-tracer/actions/workflows/release.yml)
+[![npm version](https://img.shields.io/npm/v/overlapdev.svg)](https://www.npmjs.com/package/overlapdev)
+[![GitHub Release](https://img.shields.io/github/v/release/overlapcode/overlap-tracer)](https://github.com/overlapcode/overlap-tracer/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A lightweight background daemon that watches coding agent sessions (Claude Code, with more agents coming) and forwards activity signals to your team's [Overlap](https://overlap.dev) instance.
 
 ## What It Does
@@ -21,10 +27,17 @@ The tracer extracts **signals, not code**. File contents, assistant responses, a
 ## Install
 
 ```bash
+# Recommended — downloads the right binary for your OS
 curl -fsSL https://overlap.dev/install.sh | sh
 ```
 
-Or download the binary for your platform from [GitHub Releases](https://github.com/overlapcode/overlap-tracer/releases/latest).
+Or via npm:
+
+```bash
+npm install -g overlapdev
+```
+
+Or download the binary directly from [GitHub Releases](https://github.com/overlapcode/overlap-tracer/releases/latest).
 
 ### Supported Platforms
 
