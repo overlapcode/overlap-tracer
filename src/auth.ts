@@ -8,7 +8,7 @@ import type { VerifyResponse } from "./types";
  * Response: { data: { user_id, display_name, team_name, role } }
  */
 export async function verifyToken(instanceUrl: string, token: string): Promise<VerifyResponse> {
-  const url = `${instanceUrl.replace(/\/$/, "")}/api/v1/auth/verify`;
+  const url = `${instanceUrl}/api/v1/auth/verify`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -33,7 +33,7 @@ export async function verifyToken(instanceUrl: string, token: string): Promise<V
  * Response: { data: { repos: [{ id, name, display_name }] } }
  */
 export async function fetchRepos(instanceUrl: string, token: string): Promise<string[]> {
-  const url = `${instanceUrl.replace(/\/$/, "")}/api/v1/repos`;
+  const url = `${instanceUrl}/api/v1/repos`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });

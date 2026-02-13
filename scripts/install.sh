@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://overlap.dev/install.sh | sh
 #
 # This is the canonical source. The same script is hosted at:
-# - https://overlap.dev/install.sh (overlap-site/public/install.sh)
+# - https://overlap.dev/install.sh
 # - https://github.com/overlapcode/overlap-tracer/blob/main/scripts/install.sh
 set -e
 

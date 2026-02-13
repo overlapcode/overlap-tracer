@@ -51,6 +51,9 @@ export function saveConfig(config: Config): void {
 }
 
 export function addTeam(team: TeamConfig): Config {
+  // Normalize instance_url: strip trailing slash to prevent double-slash in URLs
+  team.instance_url = team.instance_url.replace(/\/+$/, "");
+
   const config = loadConfig();
   // Replace existing team with same instance_url, or add new
   const idx = config.teams.findIndex((t) => t.instance_url === team.instance_url);

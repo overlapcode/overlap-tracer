@@ -24,7 +24,13 @@ export type IngestEvent = {
   tool_name?: string;
   file_path?: string;
   operation?: string;
+  start_line?: number;
+  end_line?: number;
+  function_name?: string;
   bash_command?: string;
+
+  // Internal: used for line enrichment, stripped before sending
+  __new_string?: string;
 
   // prompt
   prompt_text?: string;
@@ -104,4 +110,30 @@ export type VerifyResponse = {
 export type SessionParserState = {
   turnNumber: number;
   filesTouched: Set<string>;
+};
+
+// ── Team State (polled from instance, cached locally) ────────────────────
+
+export type TeamStateRegion = {
+  file_path: string;
+  start_line: number | null;
+  end_line: number | null;
+  function_name: string | null;
+  last_touched_at: string | null;
+};
+
+export type TeamStateSession = {
+  session_id: string;
+  user_id: string;
+  display_name: string;
+  repo_name: string;
+  started_at: string;
+  summary: string | null;
+  regions: TeamStateRegion[];
+};
+
+export type TeamState = {
+  updated_at: string;
+  instance_url: string;
+  sessions: TeamStateSession[];
 };

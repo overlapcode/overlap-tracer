@@ -176,6 +176,11 @@ function extractFileOp(
     sessionState.filesTouched.add(filePath);
   }
 
+  // Capture new_string for Edit/MultiEdit for line-level enrichment
+  const newString = (toolName === "Edit" || toolName === "MultiEdit")
+    ? (input.new_string as string) || undefined
+    : undefined;
+
   return {
     event_type: "file_op",
     agent_type: AGENT_TYPE,
@@ -185,6 +190,7 @@ function extractFileOp(
     file_path: filePath ?? undefined,
     operation,
     bash_command: bashCommand ?? undefined,
+    __new_string: newString,
     repo_name: "",
     user_id: "",
   };

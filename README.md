@@ -65,6 +65,7 @@ overlap status
 
 ```bash
 overlap join        # Join a team (prompts for instance URL + token)
+overlap check       # Check for team overlaps (used by Claude Code hook)
 overlap status      # Show tracer status, teams, and tracked repos
 overlap leave       # Leave a team
 overlap start       # Start the tracer daemon
@@ -81,9 +82,21 @@ overlap version     # Show version
 
 2. **The daemon watches `~/.claude/projects/`** for JSONL session files. When you start a Claude Code session in a repo that matches your team's registered repos, the tracer starts tailing the session file.
 
-3. **Events are extracted and batched** — session starts, file operations, prompts, and session ends are parsed from JSONL lines, batched (every 2s or 50 events), and sent to your team's Overlap instance via `POST /api/v1/ingest`.
+3. **Events are extracted, enriched, and batched** — session starts, file operations (with line ranges and function names), prompts, and session ends are parsed from JSONL lines, batched (every 2s or 50 events), and sent to your team's Overlap instance via `POST /api/v1/ingest`.
 
-4. **The daemon survives restarts** — byte offsets are persisted to `~/.overlap/state.json`. If the daemon crashes or your machine reboots, it picks up exactly where it left off. No data lost, no duplicates.
+4. **The daemon polls for team state** — every 30 seconds, the daemon fetches active sessions from your team's instance and caches them locally at `~/.overlap/team-state.json`. This powers the real-time coordination hook.
+
+5. **The daemon survives restarts** — byte offsets are persisted to `~/.overlap/state.json`. If the daemon crashes or your machine reboots, it picks up exactly where it left off. No data lost, no duplicates.
+
+## Real-Time Coordination
+
+When you run `overlap join` in a project directory, the tracer sets up Claude Code hooks and commands:
+
+- **PreToolUse hook** — before Claude Code edits a file, `overlap check` reads the local team-state cache and warns if a teammate is working on the same region. The warning includes the teammate's name, a link to their session, and their session summary.
+- **`/project:overlap-check`** — a slash command to manually check for overlaps at any point during a session.
+- **`/project:overlap-context`** — loads what your team is currently working on as context for the session.
+
+The hook is non-blocking: if overlap isn't installed or the cache is stale, it silently exits. Safe to commit `.claude/` to your repo — teammates without overlap installed are unaffected.
 
 ## Multi-Team Support
 

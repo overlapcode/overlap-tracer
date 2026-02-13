@@ -12,6 +12,8 @@ import { loadConfig } from "./config";
 import { loadState, saveState, getTrackedFile, setTrackedFile, createTrackedFile, toSessionParserState, updateFromParserState } from "./state";
 import { loadCache, saveCache, buildRepoListsMap, buildGitCacheMap, setRepoList, setGitRemote } from "./cache";
 import { fetchRepos } from "./auth";
+import { enrichLineData } from "./enrichment";
+import { pollTeamState } from "./team-state";
 import type { Cache } from "./types";
 
 const PID_PATH = join(homedir(), ".overlap", "tracer.pid");
@@ -29,6 +31,7 @@ export class Tracer {
   private windowsReloadTimer: ReturnType<typeof setInterval> | null = null;
   private repoSyncTimer: ReturnType<typeof setInterval> | null = null;
   private stateFlushTimer: ReturnType<typeof setInterval> | null = null;
+  private teamStatePollTimer: ReturnType<typeof setInterval> | null = null;
   private shuttingDown = false;
 
   sender: EventSender;
@@ -74,6 +77,14 @@ export class Tracer {
 
     // Periodically flush state to disk
     this.stateFlushTimer = setInterval(() => this.saveState(), 10_000);
+
+    // Start team-state polling for real-time coordination (every 30 seconds)
+    this.teamStatePollTimer = setInterval(
+      () => pollTeamState(this.config.teams).catch(() => {}),
+      30_000,
+    );
+    // Initial poll
+    pollTeamState(this.config.teams).catch(() => {});
 
     // Windows reload polling
     if (process.platform === "win32") {
@@ -135,6 +146,7 @@ export class Tracer {
         if (this.windowsReloadTimer) clearInterval(this.windowsReloadTimer);
         if (this.repoSyncTimer) clearInterval(this.repoSyncTimer);
         if (this.stateFlushTimer) clearInterval(this.stateFlushTimer);
+        if (this.teamStatePollTimer) clearInterval(this.teamStatePollTimer);
 
         await this.sender.flushAll(5000);
         this.saveState();
@@ -305,6 +317,13 @@ export class Tracer {
       const events = adapter.parseLine(line, sessionId, sessionState);
 
       for (const event of events) {
+        // Line-level enrichment for file_op events (before stripping paths)
+        if (event.event_type === "file_op" && event.__new_string && event.file_path) {
+          enrichLineData(event, tracked!.cwd);
+        }
+        // Remove internal enrichment hint before sending
+        delete event.__new_string;
+
         // Fill in user_id, repo_name, strip file paths
         if (event.file_path) {
           event.file_path = stripFilePath(event.file_path, tracked!.cwd);
