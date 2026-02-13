@@ -1,6 +1,6 @@
 {
   "name": "overlapdev",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Overlap - See what your team is building with coding agents",
   "type": "module",
   "bin": {
