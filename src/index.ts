@@ -7,12 +7,28 @@ import { Tracer, getDaemonPid, signalReload } from "./tracer";
 import { installService, uninstallService, isServiceInstalled } from "./service";
 import { existsSync, unlinkSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join, dirname } from "path";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
 const VERSION = "1.1.0";
+const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+async function checkForUpdate(): Promise<string | null> {
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json() as { tag_name?: string };
+    const latest = data.tag_name?.replace(/^v/, "");
+    if (latest && latest !== VERSION) return latest;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function printBox(text: string): void {
   const line = "─".repeat(text.length + 8);
@@ -270,6 +286,9 @@ async function cmdStatus(): Promise<void> {
   const state = loadState();
   const cache = loadCache();
 
+  // Check for updates in parallel with display
+  const updatePromise = checkForUpdate();
+
   console.log(`\n  overlap v${VERSION}\n`);
 
   // Daemon status
@@ -283,6 +302,11 @@ async function cmdStatus(): Promise<void> {
 
   // Teams
   if (config.teams.length === 0) {
+    const latestVersion = await updatePromise;
+    if (latestVersion) {
+      console.log(`\n  Update available: v${VERSION} → v${latestVersion}`);
+      console.log("  Run: curl -fsSL https://overlap.dev/install.sh | sh");
+    }
     console.log("\n  No teams configured. Run 'overlap join' to get started.\n");
     return;
   }
@@ -301,6 +325,13 @@ async function cmdStatus(): Promise<void> {
     for (const [_path, tracked] of entries) {
       console.log(`    ${tracked.session_id.slice(0, 8)}... → ${tracked.matched_repo} (turn ${tracked.turn_number})`);
     }
+  }
+
+  // Show update notice if available
+  const latestVersion = await updatePromise;
+  if (latestVersion) {
+    console.log(`\n  Update available: v${VERSION} → v${latestVersion}`);
+    console.log("  Run: curl -fsSL https://overlap.dev/install.sh | sh");
   }
 
   console.log();
@@ -444,7 +475,35 @@ async function cmdUninstall(): Promise<void> {
     console.log("  ✓ Removed ~/.overlap/");
   }
 
+  // Remove the binary itself
+  const binaryPath = process.argv[0];
+  if (!removeBinary(binaryPath)) {
+    console.log(`\n  Note: Could not auto-remove the binary at ${binaryPath}`);
+    console.log("  Remove it manually:");
+    console.log(`    rm "${binaryPath}"`);
+  }
+
   console.log("\n  Overlap tracer has been uninstalled.\n");
+}
+
+function removeBinary(binaryPath: string): boolean {
+  // Check if installed via npm (path contains node_modules or npx cache)
+  if (binaryPath.includes("node_modules") || binaryPath.includes("npm")) {
+    try {
+      execSync("npm uninstall -g overlapdev", { stdio: "pipe" });
+      console.log("  ✓ Removed npm package (overlapdev)");
+      return true;
+    } catch { /* fall through */ }
+  }
+
+  // Direct binary — try to delete it
+  try {
+    unlinkSync(binaryPath);
+    console.log(`  ✓ Removed binary (${binaryPath})`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function startDaemonBackground(): void {
