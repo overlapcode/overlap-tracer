@@ -1,0 +1,25 @@
+{
+  "name": "overlapdev",
+  "version": "1.0.0",
+  "description": "Overlap - See what your team is building with coding agents",
+  "type": "module",
+  "bin": {
+    "overlap": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "build:binary": "bash scripts/build-all.sh",
+    "dev": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "keywords": ["coding-agents", "claude-code", "team", "collaboration", "activity", "overlap"],
+  "author": "overlapcode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/overlapcode/overlap-tracer"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.9"
+  }
+}
