@@ -10,7 +10,7 @@ import { join, dirname } from "path";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
