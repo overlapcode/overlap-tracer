@@ -7,6 +7,7 @@ import { Tracer, getDaemonPid, signalReload } from "./tracer";
 import { installService, uninstallService, isServiceInstalled } from "./service";
 import { existsSync, unlinkSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join, dirname } from "path";
+import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
@@ -401,7 +402,13 @@ async function cmdStart(): Promise<void> {
   }
 
   startDaemonBackground();
-  console.log("\n  ✓ Tracer started.\n");
+
+  if (!isServiceInstalled()) {
+    installService();
+    console.log("\n  ✓ Tracer started. Registered as startup service.\n");
+  } else {
+    console.log("\n  ✓ Tracer started.\n");
+  }
 }
 
 async function cmdStop(): Promise<void> {
@@ -476,7 +483,7 @@ async function cmdUninstall(): Promise<void> {
   }
 
   // Remove the binary itself
-  const binaryPath = process.argv[0];
+  const binaryPath = process.execPath;
   if (!removeBinary(binaryPath)) {
     console.log(`\n  Note: Could not auto-remove the binary at ${binaryPath}`);
     console.log("  Remove it manually:");
@@ -507,9 +514,13 @@ function removeBinary(binaryPath: string): boolean {
 }
 
 function startDaemonBackground(): void {
-  const execPath = process.argv[0];
-  const child = spawn(execPath, ["daemon"], {
-    detached: true,
+  // In Bun-compiled binaries, process.argv[0] is "bun" — use execPath instead
+  const execPath = process.execPath;
+  const logsDir = join(homedir(), ".overlap", "logs");
+
+  // Use nohup via shell — Bun-compiled binaries don't reliably
+  // self-fork with Node's spawn({ detached: true }).
+  const child = spawn("sh", ["-c", `nohup "${execPath}" daemon >> "${logsDir}/tracer.log" 2>> "${logsDir}/tracer.error.log" &`], {
     stdio: "ignore",
   });
   child.unref();

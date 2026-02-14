@@ -6,8 +6,8 @@ import { execSync } from "child_process";
 const LABEL = "dev.overlap.tracer";
 
 function getBinaryPath(): string {
-  // Use the current executable path, or fall back to a standard location
-  const execPath = process.argv[0];
+  // In Bun-compiled binaries, process.argv[0] is "bun" — use execPath instead
+  const execPath = process.execPath;
   if (execPath && existsSync(execPath)) return execPath;
 
   if (process.platform === "win32") {
