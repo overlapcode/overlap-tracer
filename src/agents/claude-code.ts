@@ -55,7 +55,7 @@ export function parseClaudeCodeLine(
     const startEvent: IngestEvent = {
       event_type: "session_start",
       agent_type: AGENT_TYPE,
-      session_id: (parsed.sessionId as string) || sessionId,
+      session_id: (parsed.sessionId as string) || (parsed.session_id as string) || sessionId,
       timestamp: (parsed.timestamp as string) || new Date().toISOString(),
       cwd: parsed.cwd as string | undefined,
       git_branch: (parsed.gitBranch as string) || getGitBranch(parsed.cwd as string | undefined),

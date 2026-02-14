@@ -11,12 +11,17 @@ function makeState(): SessionParserState {
 const FIXTURES_DIR = join(import.meta.dir, "fixtures");
 
 describe("extractCwdFromLine", () => {
-  it("extracts cwd from a system init line", () => {
-    const line = '{"type":"system","subtype":"init","cwd":"/Users/michael/work/crop2cash","model":"claude-sonnet-4-20250514"}';
+  it("extracts cwd from any line with cwd field", () => {
+    const line = '{"type":"user","cwd":"/Users/michael/work/crop2cash","message":{"role":"user","content":"hello"},"sessionId":"sess_123","timestamp":"2026-02-10T10:00:00.000Z"}';
     expect(extractCwdFromLine(line)).toBe("/Users/michael/work/crop2cash");
   });
 
-  it("returns null for non-init lines", () => {
+  it("extracts cwd from progress line", () => {
+    const line = '{"type":"progress","cwd":"/Users/michael/work/crop2cash","sessionId":"sess_123","version":"1.0.20"}';
+    expect(extractCwdFromLine(line)).toBe("/Users/michael/work/crop2cash");
+  });
+
+  it("returns null for lines without cwd", () => {
     const line = '{"message":{"role":"user","content":"hello"}}';
     expect(extractCwdFromLine(line)).toBeNull();
   });
@@ -25,24 +30,25 @@ describe("extractCwdFromLine", () => {
     expect(extractCwdFromLine("not json")).toBeNull();
   });
 
-  it("returns null for init line without cwd", () => {
-    const line = '{"type":"system","subtype":"init","model":"claude-sonnet-4-20250514"}';
+  it("returns null for line without cwd field", () => {
+    const line = '{"type":"progress","model":"claude-sonnet-4-20250514"}';
     expect(extractCwdFromLine(line)).toBeNull();
   });
 
   it("extracts cwd from hyphenated project path", () => {
-    const line = '{"type":"system","subtype":"init","cwd":"/Users/michael/WebstormProjects/overlap-project"}';
+    const line = '{"cwd":"/Users/michael/WebstormProjects/overlap-project","type":"user","message":{"role":"user","content":"test"},"timestamp":"2026-02-10T09:00:00.000Z"}';
     expect(extractCwdFromLine(line)).toBe("/Users/michael/WebstormProjects/overlap-project");
   });
 });
 
 describe("parseClaudeCodeLine", () => {
   describe("session_start", () => {
-    it("parses system init into session_start event", () => {
-      const line = '{"type":"system","subtype":"init","session_id":"sess_123","cwd":"/Users/michael/work/crop2cash","model":"claude-sonnet-4-20250514","version":"1.0.20","timestamp":"2026-02-10T10:00:00.000Z"}';
+    it("emits session_start from first line with cwd", () => {
+      const line = '{"cwd":"/Users/michael/work/crop2cash","sessionId":"sess_123","model":"claude-sonnet-4-20250514","version":"1.0.20","timestamp":"2026-02-10T10:00:00.000Z","type":"user","message":{"role":"user","content":"hello"}}';
       const events = parseClaudeCodeLine(line, "fallback_id", makeState());
 
-      expect(events).toHaveLength(1);
+      // First user message with cwd emits session_start + prompt
+      expect(events).toHaveLength(2);
       expect(events[0].event_type).toBe("session_start");
       expect(events[0].agent_type).toBe("claude_code");
       expect(events[0].session_id).toBe("sess_123");
@@ -51,12 +57,44 @@ describe("parseClaudeCodeLine", () => {
       expect(events[0].agent_version).toBe("1.0.20");
       expect(events[0].repo_name).toBe(""); // Filled by tracer
       expect(events[0].user_id).toBe(""); // Filled by tracer
+      expect(events[1].event_type).toBe("prompt");
+      expect(events[1].prompt_text).toBe("hello");
     });
 
-    it("uses fallback session_id if not in init line", () => {
-      const line = '{"type":"system","subtype":"init","cwd":"/test","timestamp":"2026-02-10T10:00:00.000Z"}';
+    it("emits session_start from non-message line with cwd", () => {
+      const line = '{"cwd":"/test","sessionId":"sess_456","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
+      const events = parseClaudeCodeLine(line, "fallback_id", makeState());
+
+      expect(events).toHaveLength(1);
+      expect(events[0].event_type).toBe("session_start");
+      expect(events[0].session_id).toBe("sess_456");
+    });
+
+    it("uses fallback session_id if no sessionId in line", () => {
+      const line = '{"cwd":"/test","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
       const events = parseClaudeCodeLine(line, "fallback_id", makeState());
       expect(events[0].session_id).toBe("fallback_id");
+    });
+
+    it("supports session_id with underscore (legacy format)", () => {
+      const line = '{"cwd":"/test","session_id":"sess_legacy","timestamp":"2026-02-10T10:00:00.000Z"}';
+      const events = parseClaudeCodeLine(line, "fallback_id", makeState());
+      expect(events[0].session_id).toBe("sess_legacy");
+    });
+
+    it("does not emit session_start twice", () => {
+      const state = makeState();
+      const line1 = '{"cwd":"/test","sessionId":"sess_1","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
+      const line2 = '{"cwd":"/test","sessionId":"sess_1","timestamp":"2026-02-10T10:00:01.000Z","message":{"role":"user","content":"hello"}}';
+
+      const events1 = parseClaudeCodeLine(line1, "sess_1", state);
+      const events2 = parseClaudeCodeLine(line2, "sess_1", state);
+
+      expect(events1).toHaveLength(1);
+      expect(events1[0].event_type).toBe("session_start");
+      // Second line should be a prompt, not another session_start
+      expect(events2).toHaveLength(1);
+      expect(events2[0].event_type).toBe("prompt");
     });
   });
 
@@ -185,7 +223,7 @@ describe("parseClaudeCodeLine", () => {
       const state = makeState();
       const allEvents = lines.flatMap((line) => parseClaudeCodeLine(line, "sess_abc123", state));
 
-      // init + prompt + 2 file_ops (Read, Edit) + result
+      // session_start + prompt (from first user line) + 2 file_ops (Read, Edit) + result
       expect(allEvents.length).toBe(5);
       expect(allEvents[0].event_type).toBe("session_start");
       expect(allEvents[1].event_type).toBe("prompt");
