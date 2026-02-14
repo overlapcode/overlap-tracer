@@ -167,7 +167,7 @@ async function cmdJoin(): Promise<void> {
   // Set up Claude Code hooks and commands in current directory
   setupHooksAndCommands();
 
-  console.log(`\n  Dashboard: ${instanceUrl}/app\n`);
+  console.log(`\n  Dashboard: ${instanceUrl}\n`);
 }
 
 /**
