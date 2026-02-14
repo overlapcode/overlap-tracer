@@ -18,13 +18,14 @@ export const claudeCodeAdapter: AgentAdapter = {
 };
 
 /**
- * Extract the `cwd` from a Claude Code JSONL init line.
- * Returns null if the line is not an init line or has no cwd.
+ * Extract the `cwd` from a Claude Code JSONL line.
+ * Claude Code puts `cwd` on most line types (user, assistant, progress).
+ * Returns null if the line has no cwd field.
  */
 export function extractCwdFromLine(line: string): string | null {
   try {
     const parsed = JSON.parse(line);
-    if (parsed.type === "system" && parsed.subtype === "init" && parsed.cwd) {
+    if (parsed.cwd && typeof parsed.cwd === "string") {
       return parsed.cwd;
     }
   } catch {
@@ -48,15 +49,16 @@ export function parseClaudeCodeLine(
     return [];
   }
 
-  // System init → session_start
-  if (parsed.type === "system" && parsed.subtype === "init") {
-    return [{
+  // First line with cwd + sessionId → session_start (Claude Code has no system/init line)
+  if (parsed.cwd && sessionState.turnNumber === 0 && !sessionState._sessionStartEmitted) {
+    sessionState._sessionStartEmitted = true;
+    const startEvent: IngestEvent = {
       event_type: "session_start",
       agent_type: AGENT_TYPE,
-      session_id: (parsed.session_id as string) || sessionId,
+      session_id: (parsed.sessionId as string) || sessionId,
       timestamp: (parsed.timestamp as string) || new Date().toISOString(),
       cwd: parsed.cwd as string | undefined,
-      git_branch: getGitBranch(parsed.cwd as string | undefined),
+      git_branch: (parsed.gitBranch as string) || getGitBranch(parsed.cwd as string | undefined),
       model: parsed.model as string | undefined,
       agent_version: parsed.version as string | undefined,
       hostname: hostname(),
@@ -64,7 +66,28 @@ export function parseClaudeCodeLine(
       is_remote: isRemoteSession(parsed),
       repo_name: "",
       user_id: "",
-    }];
+    };
+
+    // If this line is also a user message, emit both session_start + prompt
+    const message = parsed.message as Record<string, unknown> | undefined;
+    if (message?.role === "user") {
+      const promptText = extractUserPromptText(message.content);
+      if (promptText) {
+        sessionState.turnNumber++;
+        return [startEvent, {
+          event_type: "prompt",
+          agent_type: AGENT_TYPE,
+          session_id: (parsed.sessionId as string) || sessionId,
+          timestamp: (parsed.timestamp as string) || new Date().toISOString(),
+          prompt_text: promptText,
+          turn_number: sessionState.turnNumber,
+          repo_name: "",
+          user_id: "",
+        }];
+      }
+    }
+
+    return [startEvent];
   }
 
   const message = parsed.message as Record<string, unknown> | undefined;
@@ -199,7 +222,7 @@ function extractFileOp(
 function getGitBranch(cwd: string | undefined): string | undefined {
   if (!cwd) return undefined;
   try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, timeout: 3000 })
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, timeout: 3000, stdio: ["pipe", "pipe", "pipe"] })
       .toString().trim();
     return branch || undefined;
   } catch {

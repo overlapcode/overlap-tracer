@@ -6,7 +6,7 @@ import type { Config, IngestEvent, SessionParserState, State, TrackedFile } from
 import type { AgentAdapter } from "./agents/types";
 import { claudeCodeAdapter } from "./agents/claude-code";
 import { extractCwdFromLine } from "./agents/claude-code";
-import { matchRepo, stripFilePath } from "./matcher";
+import { matchRepo, matchFileToRepo, stripFilePath } from "./matcher";
 import { EventSender } from "./sender";
 import { loadConfig } from "./config";
 import { loadState, saveState, getTrackedFile, setTrackedFile, createTrackedFile, toSessionParserState, updateFromParserState } from "./state";
@@ -292,12 +292,22 @@ export class Tracer {
         return;
       }
 
+      // Build subdirectory → repo name mapping for parent-directory sessions
+      const subDirRepos: Record<string, string> = {};
+      const hasSubDirs = matches.some((m) => m.subDir);
+      if (hasSubDirs) {
+        for (const m of matches) {
+          if (m.subDir) subDirRepos[m.subDir] = m.repoName;
+        }
+      }
+
       tracked = createTrackedFile(
         sessionId,
         cwd,
-        matches.map((m) => m.teamUrl),
+        [...new Set(matches.map((m) => m.teamUrl))],
         matches[0].repoName,
       );
+      if (hasSubDirs) tracked.sub_dir_repos = subDirRepos;
       setTrackedFile(this.state, filePath, tracked);
       this.sessionStates.set(filePath, {
         turnNumber: 0,
@@ -306,6 +316,9 @@ export class Tracer {
     }
 
     const sessionState = this.sessionStates.get(filePath)!;
+    const subDirMap = tracked!.sub_dir_repos
+      ? new Map(Object.entries(tracked!.sub_dir_repos))
+      : null;
 
     // Parse each line and send events
     let bytesProcessed = 0;
@@ -324,14 +337,43 @@ export class Tracer {
         // Remove internal enrichment hint before sending
         delete event.__new_string;
 
-        // Fill in user_id, repo_name, strip file paths
-        if (event.file_path) {
+        // Determine which repo this event belongs to
+        let eventRepoName = tracked!.matched_repo;
+
+        if (subDirMap && event.file_path) {
+          // Parent-directory mode: route file_ops to the correct repo
+          const fileRepo = matchFileToRepo(event.file_path, tracked!.cwd!, subDirMap);
+          if (fileRepo) {
+            eventRepoName = fileRepo;
+          } else if (event.event_type === "file_op") {
+            // File doesn't belong to any registered repo — skip
+            continue;
+          }
+        }
+
+        // For parent-directory sessions, use composite session IDs per repo
+        if (subDirMap && eventRepoName !== tracked!.matched_repo) {
+          event.session_id = `${event.session_id}:${eventRepoName}`;
+        }
+
+        // Strip file paths relative to the repo subdirectory if applicable
+        if (subDirMap && event.file_path) {
+          // Find which subDir this file is under
+          const cwdPrefix = tracked!.cwd!.endsWith("/") ? tracked!.cwd! : tracked!.cwd! + "/";
+          for (const [subDir, repo] of subDirMap) {
+            if (repo === eventRepoName && event.file_path.startsWith(cwdPrefix + subDir + "/")) {
+              event.file_path = event.file_path.slice((cwdPrefix + subDir + "/").length);
+              break;
+            }
+          }
+        } else if (event.file_path) {
           event.file_path = stripFilePath(event.file_path, tracked!.cwd);
         }
+
         if (event.files_touched) {
           event.files_touched = event.files_touched.map((f) => stripFilePath(f, tracked!.cwd));
         }
-        event.repo_name = tracked!.matched_repo;
+        event.repo_name = eventRepoName;
 
         // Send to each matched team
         for (const teamUrl of tracked!.matched_teams) {

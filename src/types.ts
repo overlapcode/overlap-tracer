@@ -78,6 +78,8 @@ export type TrackedFile = {
   turn_number: number;
   files_touched: string[];
   cwd: string | undefined;
+  /** Maps subdirectory name → repo name for parent-directory sessions */
+  sub_dir_repos?: Record<string, string>;
 };
 
 export type State = {
@@ -110,6 +112,7 @@ export type VerifyResponse = {
 export type SessionParserState = {
   turnNumber: number;
   filesTouched: Set<string>;
+  _sessionStartEmitted?: boolean;
 };
 
 // ── Team State (polled from instance, cached locally) ────────────────────

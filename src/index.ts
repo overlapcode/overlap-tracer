@@ -63,7 +63,7 @@ function printUsage(): void {
   overlap v${VERSION} — See what your team is building with coding agents
 
   Usage:
-    overlap join        Join a team (prompts for instance URL + token)
+    overlap join [url]  Join a team (optionally pass instance URL)
     overlap status      Show tracer status, teams, and repos
     overlap leave       Leave a team
     overlap start       Start the tracer daemon
@@ -82,7 +82,15 @@ function printUsage(): void {
 async function cmdJoin(): Promise<void> {
   printBox("overlap · join a team");
 
-  const instanceUrl = await prompt("Instance URL: ");
+  // Accept URL from command line: overlap join <url>
+  let instanceUrl = process.argv[3] || "";
+  if (instanceUrl) {
+    // Normalize: strip trailing slashes
+    instanceUrl = instanceUrl.replace(/\/+$/, "");
+    console.log(`  Instance URL: ${instanceUrl}`);
+  } else {
+    instanceUrl = (await prompt("Instance URL: ")).replace(/\/+$/, "");
+  }
   if (!instanceUrl) {
     console.log("  Cancelled.\n");
     return;
