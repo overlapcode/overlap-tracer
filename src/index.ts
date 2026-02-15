@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.1.6";
+const VERSION = "1.2.0";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -63,7 +63,8 @@ function printUsage(): void {
   overlap v${VERSION} — See what your team is building with coding agents
 
   Usage:
-    overlap join [url]  Join a team (optionally pass instance URL)
+    overlap join [url]  Join a team (or update token for existing team)
+    overlap login       Open dashboard in browser
     overlap status      Show tracer status, teams, and repos
     overlap leave       Leave a team
     overlap start       Start the tracer daemon
@@ -80,20 +81,33 @@ function printUsage(): void {
 // ── Commands ─────────────────────────────────────────────────────────────
 
 async function cmdJoin(): Promise<void> {
-  printBox("overlap · join a team");
-
   // Accept URL from command line: overlap join <url>
   let instanceUrl = process.argv[3] || "";
   if (instanceUrl) {
     // Normalize: strip trailing slashes
     instanceUrl = instanceUrl.replace(/\/+$/, "");
-    console.log(`  Instance URL: ${instanceUrl}`);
   } else {
+    printBox("overlap · join a team");
     instanceUrl = (await prompt("Instance URL: ")).replace(/\/+$/, "");
   }
   if (!instanceUrl) {
     console.log("  Cancelled.\n");
     return;
+  }
+
+  // Check if this team already exists in config
+  const existingConfig = loadConfig();
+  const existingTeam = existingConfig.teams.find((t) => t.instance_url === instanceUrl);
+
+  if (existingTeam) {
+    printBox("overlap · update token");
+    console.log(`  Team: ${existingTeam.name} (${instanceUrl})`);
+    console.log(`  This team is already configured. Enter a new token to update.\n`);
+  } else {
+    if (process.argv[3]) {
+      printBox("overlap · join a team");
+    }
+    console.log(`  Instance URL: ${instanceUrl}`);
   }
 
   const userToken = await prompt("Your token: ");
@@ -127,7 +141,7 @@ async function cmdJoin(): Promise<void> {
     console.log(`  Repos: ${repos.join(", ")}`);
   }
 
-  // Save config
+  // Save config (addTeam replaces existing team by instance_url)
   ensureOverlapDir();
   const config = addTeam({
     name: verifyResult.team_name,
@@ -141,11 +155,17 @@ async function cmdJoin(): Promise<void> {
   setRepoList(cache, instanceUrl, repos);
   saveCache(cache);
 
+  if (existingTeam) {
+    console.log(`\n  ✓ Token updated for "${verifyResult.team_name}".`);
+  }
+
   // Handle daemon
   const pid = getDaemonPid();
   if (pid) {
-    console.log(`\n  Tracer already running (PID ${pid}).`);
-    console.log(`  Added "${verifyResult.team_name}" to config.`);
+    console.log(`  Tracer already running (PID ${pid}).`);
+    if (!existingTeam) {
+      console.log(`  Added "${verifyResult.team_name}" to config.`);
+    }
     console.log("  Reloading tracer...");
     signalReload(pid);
     console.log(`\n  ✓ Now tracking ${config.teams.length} team(s):`);
@@ -289,6 +309,66 @@ If no active sessions, confirm the team is clear.
   }
 }
 
+async function cmdLogin(): Promise<void> {
+  const config = loadConfig();
+
+  if (config.teams.length === 0) {
+    console.log("\n  No teams configured. Run 'overlap join' first.\n");
+    return;
+  }
+
+  let team: typeof config.teams[0];
+
+  if (config.teams.length === 1) {
+    team = config.teams[0];
+  } else {
+    console.log("\n  Select a team to open:");
+    for (let i = 0; i < config.teams.length; i++) {
+      console.log(`    ${i + 1}. ${config.teams[i].name} (${config.teams[i].instance_url})`);
+    }
+    const choice = await prompt("Choice (number): ");
+    const idx = parseInt(choice, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= config.teams.length) {
+      console.log("  Invalid choice.\n");
+      return;
+    }
+    team = config.teams[idx];
+  }
+
+  process.stdout.write(`\n  Opening ${team.name} dashboard...`);
+
+  try {
+    const res = await fetch(`${team.instance_url}/api/v1/auth/login-link`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${team.user_token}` },
+    });
+
+    if (res.status === 401) {
+      console.log(` ✗\n  Token rejected. Run 'overlap join ${team.instance_url}' to update your token.\n`);
+      return;
+    }
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({} as Record<string, unknown>));
+      throw new Error((body as Record<string, unknown>).error as string || `HTTP ${res.status}`);
+    }
+
+    const body = (await res.json()) as { data: { login_url: string } };
+    const loginUrl = body.data.login_url;
+
+    // Open in default browser
+    const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+    try {
+      execSync(`${openCmd} "${loginUrl}"`, { stdio: "pipe" });
+      console.log(" ✓\n");
+    } catch {
+      console.log(` ✓\n\n  Open this URL in your browser:\n  ${loginUrl}\n`);
+    }
+  } catch (err) {
+    console.log(` ✗\n  Error: ${err instanceof Error ? err.message : err}\n`);
+  }
+}
+
 async function cmdStatus(): Promise<void> {
   const config = loadConfig();
   const pid = getDaemonPid();
@@ -321,9 +401,32 @@ async function cmdStatus(): Promise<void> {
   }
 
   console.log(`\n  Teams (${config.teams.length}):`);
+  // Quick-verify each team's token in parallel
+  const verifyResults = await Promise.allSettled(
+    config.teams.map(async (team) => {
+      try {
+        const res = await fetch(`${team.instance_url}/api/v1/auth/verify`, {
+          headers: { Authorization: `Bearer ${team.user_token}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        return { url: team.instance_url, status: res.status };
+      } catch {
+        return { url: team.instance_url, status: 0 };
+      }
+    }),
+  );
+  const tokenStatus = new Map<string, number>();
+  for (const result of verifyResults) {
+    if (result.status === "fulfilled") {
+      tokenStatus.set(result.value.url, result.value.status);
+    }
+  }
+
   for (const team of config.teams) {
     const repos = cache.repo_lists[team.instance_url]?.repos ?? [];
-    console.log(`    ${team.name.padEnd(20)} · ${repos.length} repo(s) · ${team.instance_url}`);
+    const status = tokenStatus.get(team.instance_url);
+    const warning = status === 401 ? " ⚠ token rejected" : status === 0 ? " ⚠ unreachable" : "";
+    console.log(`    ${team.name.padEnd(20)} · ${repos.length} repo(s) · ${team.instance_url}${warning}`);
   }
 
   // Tracked sessions
@@ -543,6 +646,7 @@ const command = process.argv[2];
 
 switch (command) {
   case "join":      await cmdJoin(); break;
+  case "login":     await cmdLogin(); break;
   case "check":     await cmdCheck(); break;
   case "status":    await cmdStatus(); break;
   case "leave":     await cmdLeave(); break;

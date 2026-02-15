@@ -16,8 +16,12 @@ const TEAM_STATE_TMP = join(OVERLAP_DIR, "team-state.tmp.json");
 
 /**
  * Poll all configured teams for active session state and write to local cache.
+ * @param onAuthFailure - Called when a team returns 401 (token rejected)
  */
-export async function pollTeamState(teams: TeamConfig[]): Promise<void> {
+export async function pollTeamState(
+  teams: TeamConfig[],
+  onAuthFailure?: (teamUrl: string) => void,
+): Promise<void> {
   const allSessions: TeamStateSession[] = [];
 
   for (const team of teams) {
@@ -29,6 +33,10 @@ export async function pollTeamState(teams: TeamConfig[]): Promise<void> {
         },
       });
 
+      if (response.status === 401) {
+        onAuthFailure?.(team.instance_url);
+        continue;
+      }
       if (!response.ok) continue;
 
       const result = (await response.json()) as {

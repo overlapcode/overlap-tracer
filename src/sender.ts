@@ -25,6 +25,9 @@ export class EventSender {
   private batchIntervalMs: number;
   private maxBatchSize: number;
   private onBatchSent?: (teamUrl: string, count: number) => void;
+  private onAuthFailure?: (teamUrl: string) => void;
+  private suspendedTeams = new Set<string>();
+  private warnedTeams = new Set<string>();
 
   constructor(
     config: { batch_interval_ms: number; max_batch_size: number },
@@ -35,7 +38,34 @@ export class EventSender {
     this.onBatchSent = onBatchSent;
   }
 
+  setOnAuthFailure(callback: (teamUrl: string) => void): void {
+    this.onAuthFailure = callback;
+  }
+
+  isTeamSuspended(teamUrl: string): boolean {
+    return this.suspendedTeams.has(teamUrl);
+  }
+
+  suspendTeam(teamUrl: string): void {
+    this.suspendedTeams.add(teamUrl);
+    // Clear any pending events for this team
+    const batch = this.batches.get(teamUrl);
+    if (batch) {
+      if (batch.timer) clearTimeout(batch.timer);
+      if (batch.retryTimer) clearTimeout(batch.retryTimer);
+      this.batches.delete(teamUrl);
+    }
+  }
+
+  unsuspendTeam(teamUrl: string): void {
+    this.suspendedTeams.delete(teamUrl);
+    this.warnedTeams.delete(teamUrl);
+  }
+
   add(teamUrl: string, token: string, event: IngestEvent): void {
+    // Skip silently if team is suspended (401'd)
+    if (this.suspendedTeams.has(teamUrl)) return;
+
     let batch = this.batches.get(teamUrl);
     if (!batch) {
       batch = { teamUrl, token, events: [], timer: null, retryCount: 0, retryTimer: null };
@@ -75,6 +105,16 @@ export class EventSender {
         body: JSON.stringify({ events }),
       });
 
+      if (res.status === 401) {
+        // Auth failure — suspend this team, don't retry
+        if (!this.warnedTeams.has(teamUrl)) {
+          console.warn(`[${teamUrl}] Token rejected (401). Suspending sends until token is updated.`);
+          this.warnedTeams.add(teamUrl);
+        }
+        this.suspendTeam(teamUrl);
+        this.onAuthFailure?.(teamUrl);
+        return;
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({} as Record<string, unknown>));
         const errMsg = (body as Record<string, unknown>).error || `HTTP ${res.status}`;

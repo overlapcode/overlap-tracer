@@ -50,6 +50,10 @@ export class Tracer {
       }
     });
 
+    this.sender.setOnAuthFailure((teamUrl) => {
+      console.warn(`[tracer] Token rejected by ${teamUrl}. Run 'overlap join ${teamUrl}' with a new token.`);
+    });
+
     // Restore session parser states from persisted state
     for (const [filePath, tracked] of Object.entries(this.state.tracked_files)) {
       this.sessionStates.set(filePath, toSessionParserState(tracked));
@@ -79,12 +83,20 @@ export class Tracer {
     this.stateFlushTimer = setInterval(() => this.saveState(), 10_000);
 
     // Start team-state polling for real-time coordination (every 30 seconds)
+    const authFailureHandler = (teamUrl: string) => {
+      this.sender.suspendTeam(teamUrl);
+    };
     this.teamStatePollTimer = setInterval(
-      () => pollTeamState(this.config.teams).catch(() => {}),
+      () => {
+        const activeTeams = this.config.teams.filter((t) => !this.sender.isTeamSuspended(t.instance_url));
+        if (activeTeams.length > 0) {
+          pollTeamState(activeTeams, authFailureHandler).catch(() => {});
+        }
+      },
       30_000,
     );
     // Initial poll
-    pollTeamState(this.config.teams).catch(() => {});
+    pollTeamState(this.config.teams, authFailureHandler).catch(() => {});
 
     // Windows reload polling
     if (process.platform === "win32") {
@@ -183,6 +195,7 @@ export class Tracer {
 
   private async refreshAllRepoLists(): Promise<void> {
     for (const team of this.config.teams) {
+      if (this.sender.isTeamSuspended(team.instance_url)) continue;
       try {
         const repos = await fetchRepos(team.instance_url, team.user_token);
         setRepoList(this.cache, team.instance_url, repos);
