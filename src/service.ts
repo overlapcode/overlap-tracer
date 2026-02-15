@@ -64,8 +64,8 @@ function installMacService(): void {
 function uninstallMacService(): void {
   const plistPath = getMacPlistPath();
   try {
-    execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
-  } catch { /* not loaded */ }
+    execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe", timeout: 10000 });
+  } catch { /* not loaded or timed out */ }
   try {
     unlinkSync(plistPath);
   } catch { /* not found */ }

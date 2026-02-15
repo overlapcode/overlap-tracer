@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.1.5";
+const VERSION = "1.1.6";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -378,13 +378,14 @@ async function cmdLeave(): Promise<void> {
 
   if (updated.teams.length === 0) {
     // Last team — stop everything
+    // Uninstall service first (KeepAlive would respawn killed daemon)
+    uninstallService();
+    console.log("  ✓ Removed startup service");
     const pid = getDaemonPid();
     if (pid) {
       console.log("  Stopping tracer...");
-      process.kill(pid, "SIGTERM");
+      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
     }
-    uninstallService();
-    console.log("  ✓ Removed startup service");
     console.log(`  ✓ Left "${teamToLeave.name}". No teams remaining.\n`);
   } else {
     // Reload daemon with updated config
@@ -472,16 +473,18 @@ async function cmdDebug(): Promise<void> {
 async function cmdUninstall(): Promise<void> {
   console.log("\n  Uninstalling Overlap tracer...");
 
-  // Stop daemon
-  const pid = getDaemonPid();
-  if (pid) {
-    process.kill(pid, "SIGTERM");
-    console.log("  ✓ Stopped tracer daemon");
-  }
-
-  // Remove service
+  // Remove service FIRST — launchd has KeepAlive=true, so killing the
+  // daemon manually would cause launchd to respawn it immediately.
+  // launchctl unload properly stops the managed process and removes the job.
   uninstallService();
   console.log("  ✓ Removed startup service");
+
+  // Kill daemon if still running (e.g. started manually without service)
+  const pid = getDaemonPid();
+  if (pid) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    console.log("  ✓ Stopped tracer daemon");
+  }
 
   // Remove config directory
   const overlapDir = getOverlapDir();
