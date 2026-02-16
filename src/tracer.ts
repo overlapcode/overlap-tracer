@@ -212,6 +212,8 @@ export class Tracer {
   }
 
   private async refreshAllRepoLists(): Promise<void> {
+    const oldRepoLists = this.repoLists;
+
     for (const team of this.config.teams) {
       if (this.sender.isTeamSuspended(team.instance_url)) continue;
       try {
@@ -224,6 +226,34 @@ export class Tracer {
     }
     this.repoLists = buildRepoListsMap(this.cache);
     saveCache(this.cache);
+
+    // Detect changes and act on them
+    const { added, removed } = diffRepoLists(oldRepoLists, this.repoLists);
+
+    if (removed.length > 0) {
+      console.log(`[tracer] Repos removed: ${removed.join(', ')}`);
+      this.cleanupRemovedRepos(removed);
+    }
+
+    if (added.length > 0) {
+      console.log(`[tracer] Repos added: ${added.join(', ')}. Re-scanning for backfill...`);
+      for (const adapter of this.adapters) {
+        this.scanExistingFiles(adapter);
+      }
+    }
+  }
+
+  private cleanupRemovedRepos(removedRepos: string[]): void {
+    const removedSet = new Set(removedRepos);
+
+    for (const [filePath, tracked] of Object.entries(this.state.tracked_files)) {
+      if (!removedSet.has(tracked.matched_repo)) continue;
+
+      console.log(`[tracer] Untracking ${filePath} (repo "${tracked.matched_repo}" removed)`);
+      delete this.state.tracked_files[filePath];
+      this.readHeads.delete(filePath);
+      this.sessionStates.delete(filePath);
+    }
   }
 
   private scanExistingFiles(adapter: AgentAdapter): void {
@@ -488,6 +518,35 @@ export class Tracer {
       }
     }
   }
+}
+
+// ── Repo list diffing ────────────────────────────────────────────────────
+
+export function diffRepoLists(
+  oldLists: Map<string, string[]>,
+  newLists: Map<string, string[]>,
+): { added: string[]; removed: string[] } {
+  const oldAll = new Set<string>();
+  for (const repos of oldLists.values()) {
+    for (const r of repos) oldAll.add(r);
+  }
+
+  const newAll = new Set<string>();
+  for (const repos of newLists.values()) {
+    for (const r of repos) newAll.add(r);
+  }
+
+  const added: string[] = [];
+  for (const r of newAll) {
+    if (!oldAll.has(r)) added.push(r);
+  }
+
+  const removed: string[] = [];
+  for (const r of oldAll) {
+    if (!newAll.has(r)) removed.push(r);
+  }
+
+  return { added, removed };
 }
 
 // ── Daemon PID helpers ───────────────────────────────────────────────────
