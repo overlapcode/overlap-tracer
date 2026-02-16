@@ -2,7 +2,7 @@ import { watch, readFileSync, existsSync, statSync, writeFileSync, unlinkSync } 
 import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { readdirSync } from "fs";
-import type { Config, IngestEvent, SessionParserState, State, TrackedFile } from "./types";
+import type { Config, IngestEvent, SessionParserState, State, TrackedFile, GitRemoteEntry } from "./types";
 import type { AgentAdapter } from "./agents/types";
 import { claudeCodeAdapter } from "./agents/claude-code";
 import { extractCwdFromLine } from "./agents/claude-code";
@@ -27,7 +27,7 @@ export class Tracer {
   private watchers: ReturnType<typeof watch>[] = [];
   private sessionStates = new Map<string, SessionParserState>();
   private repoLists: Map<string, string[]>;
-  private gitCache: Map<string, string>;
+  private gitCache: Map<string, GitRemoteEntry>;
   private windowsReloadTimer: ReturnType<typeof setInterval> | null = null;
   private repoSyncTimer: ReturnType<typeof setInterval> | null = null;
   private stateFlushTimer: ReturnType<typeof setInterval> | null = null;
@@ -438,6 +438,14 @@ export class Tracer {
           event.files_touched = event.files_touched.map((f) => stripFilePath(f, tracked!.cwd));
         }
         event.repo_name = eventRepoName;
+
+        // Attach git remote URL to session_start events
+        if (event.event_type === "session_start" && tracked!.cwd) {
+          const gitEntry = this.gitCache.get(tracked!.cwd);
+          if (gitEntry?.remoteUrl) {
+            event.git_remote_url = gitEntry.remoteUrl;
+          }
+        }
 
         // Send to each matched team
         for (const teamUrl of tracked!.matched_teams) {

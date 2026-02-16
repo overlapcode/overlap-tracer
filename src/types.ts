@@ -19,6 +19,7 @@ export type IngestEvent = {
   hostname?: string;
   device_name?: string;
   is_remote?: boolean;
+  git_remote_url?: string;
 
   // file_op
   tool_name?: string;
@@ -97,9 +98,11 @@ export type RepoListEntry = {
   fetched_at: string;
 };
 
+export type GitRemoteEntry = { name: string; remoteUrl: string };
+
 export type Cache = {
   repo_lists: Record<string, RepoListEntry>;
-  git_remotes: Record<string, string>;
+  git_remotes: Record<string, string | GitRemoteEntry>;
 };
 
 // ── Auth ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { basename, join } from "path";
 import { execSync } from "child_process";
 import { readdirSync, statSync } from "fs";
+import type { GitRemoteEntry } from "./types";
 
 export type RepoMatch = {
   teamUrl: string;
@@ -19,13 +20,13 @@ export type RepoMatch = {
  *
  * @param cwd - The real working directory from the JSONL init line
  * @param repoLists - Map of team_url → repo name arrays
- * @param gitCache - Mutable cache of cwd → repo name from git remote lookups
+ * @param gitCache - Mutable cache of cwd → git remote entry from git remote lookups
  * @returns Array of matches (can match multiple teams/repos)
  */
 export function matchRepo(
   cwd: string,
   repoLists: Map<string, string[]>,
-  gitCache: Map<string, string>,
+  gitCache: Map<string, GitRemoteEntry>,
 ): RepoMatch[] {
   const dirName = basename(cwd);
 
@@ -40,17 +41,18 @@ export function matchRepo(
 
   // Step 2: If no match by basename, try git remote
   if (matches.length === 0) {
-    let gitRepoName = gitCache.get(cwd);
-    if (gitRepoName === undefined) {
-      gitRepoName = getGitRepoName(cwd) ?? "";
-      if (gitRepoName) {
-        gitCache.set(cwd, gitRepoName);
+    let gitEntry = gitCache.get(cwd);
+    if (gitEntry === undefined) {
+      const resolved = resolveGitRemote(cwd);
+      if (resolved) {
+        gitEntry = resolved;
+        gitCache.set(cwd, resolved);
       }
     }
-    if (gitRepoName) {
+    if (gitEntry?.name) {
       for (const [teamUrl, repos] of repoLists) {
-        if (repos.includes(gitRepoName)) {
-          matches.push({ teamUrl, repoName: gitRepoName });
+        if (repos.includes(gitEntry.name)) {
+          matches.push({ teamUrl, repoName: gitEntry.name });
         }
       }
     }
@@ -72,7 +74,7 @@ export function matchRepo(
 function matchSubdirectories(
   cwd: string,
   repoLists: Map<string, string[]>,
-  gitCache: Map<string, string>,
+  gitCache: Map<string, GitRemoteEntry>,
 ): RepoMatch[] {
   const matches: RepoMatch[] = [];
 
@@ -102,15 +104,18 @@ function matchSubdirectories(
       }
 
       // Check git remote match
-      let gitName = gitCache.get(subPath);
-      if (gitName === undefined) {
-        gitName = getGitRepoName(subPath) ?? "";
-        if (gitName) gitCache.set(subPath, gitName);
+      let gitEntry = gitCache.get(subPath);
+      if (gitEntry === undefined) {
+        const resolved = resolveGitRemote(subPath);
+        if (resolved) {
+          gitEntry = resolved;
+          gitCache.set(subPath, resolved);
+        }
       }
-      if (gitName && allRepos.has(gitName)) {
+      if (gitEntry?.name && allRepos.has(gitEntry.name)) {
         for (const [teamUrl, repos] of repoLists) {
-          if (repos.includes(gitName)) {
-            matches.push({ teamUrl, repoName: gitName, subDir: subName });
+          if (repos.includes(gitEntry.name)) {
+            matches.push({ teamUrl, repoName: gitEntry.name, subDir: subName });
           }
         }
       }
@@ -143,14 +148,20 @@ export function matchFileToRepo(
   return subDirRepos.get(topDir) ?? null;
 }
 
-function getGitRepoName(cwd: string): string | null {
+/**
+ * Resolve git remote origin URL and extract the repo name.
+ * Returns both the full URL and the extracted name.
+ */
+function resolveGitRemote(cwd: string): GitRemoteEntry | null {
   try {
-    const remote = execSync("git remote get-url origin", { cwd, timeout: 5000, stdio: ["pipe", "pipe", "pipe"] })
+    const remoteUrl = execSync("git remote get-url origin", { cwd, timeout: 5000, stdio: ["pipe", "pipe", "pipe"] })
       .toString().trim();
     // https://github.com/org/repo.git → "repo"
     // git@github.com:org/repo.git → "repo"
-    const match = remote.match(/[/:]([^/:]+?)(?:\.git)?$/);
-    return match?.[1] || null;
+    const match = remoteUrl.match(/[/:]([^/:]+?)(?:\.git)?$/);
+    const name = match?.[1] || null;
+    if (!name) return null;
+    return { name, remoteUrl };
   } catch {
     return null;
   }

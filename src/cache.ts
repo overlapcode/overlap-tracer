@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import type { Cache } from "./types";
+import type { Cache, GitRemoteEntry } from "./types";
 import { ensureOverlapDir } from "./config";
 
 const CACHE_PATH = join(homedir(), ".overlap", "cache.json");
@@ -34,12 +34,16 @@ export function removeRepoList(cache: Cache, instanceUrl: string): void {
   delete cache.repo_lists[instanceUrl];
 }
 
-export function getGitRemote(cache: Cache, cwd: string): string | undefined {
-  return cache.git_remotes[cwd];
+export function getGitRemote(cache: Cache, cwd: string): GitRemoteEntry | undefined {
+  const entry = cache.git_remotes[cwd];
+  if (!entry) return undefined;
+  // Backward compat: old cache has plain string values (just the repo name)
+  if (typeof entry === "string") return { name: entry, remoteUrl: "" };
+  return entry;
 }
 
-export function setGitRemote(cache: Cache, cwd: string, repoName: string): void {
-  cache.git_remotes[cwd] = repoName;
+export function setGitRemote(cache: Cache, cwd: string, entry: GitRemoteEntry): void {
+  cache.git_remotes[cwd] = entry;
 }
 
 /**
@@ -54,8 +58,17 @@ export function buildRepoListsMap(cache: Cache): Map<string, string[]> {
 }
 
 /**
- * Build a Map<cwd, repoName> from the cache for the matcher.
+ * Build a Map<cwd, GitRemoteEntry> from the cache for the matcher.
+ * Handles backward compat with old caches that stored plain strings.
  */
-export function buildGitCacheMap(cache: Cache): Map<string, string> {
-  return new Map(Object.entries(cache.git_remotes));
+export function buildGitCacheMap(cache: Cache): Map<string, GitRemoteEntry> {
+  const map = new Map<string, GitRemoteEntry>();
+  for (const [cwd, entry] of Object.entries(cache.git_remotes)) {
+    if (typeof entry === "string") {
+      map.set(cwd, { name: entry, remoteUrl: "" });
+    } else {
+      map.set(cwd, entry);
+    }
+  }
+  return map;
 }

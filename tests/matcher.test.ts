@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { matchRepo, stripFilePath } from "../src/matcher";
+import type { GitRemoteEntry } from "../src/types";
 
 describe("matchRepo", () => {
   const repoLists = new Map<string, string[]>([
@@ -8,26 +9,26 @@ describe("matchRepo", () => {
   ]);
 
   it("matches by basename", () => {
-    const gitCache = new Map<string, string>();
+    const gitCache = new Map<string, GitRemoteEntry>();
     const matches = matchRepo("/Users/michael/work/crop2cash", repoLists, gitCache);
     expect(matches).toEqual([{ teamUrl: "https://team-a.workers.dev", repoName: "crop2cash" }]);
   });
 
   it("matches hyphenated project names correctly", () => {
-    const gitCache = new Map<string, string>();
+    const gitCache = new Map<string, GitRemoteEntry>();
     const matches = matchRepo("/Users/michael/work/crop2cash-infra", repoLists, gitCache);
     expect(matches).toEqual([{ teamUrl: "https://team-a.workers.dev", repoName: "crop2cash-infra" }]);
   });
 
   it("returns empty for unrecognized repos", () => {
-    const gitCache = new Map<string, string>();
+    const gitCache = new Map<string, GitRemoteEntry>();
     const matches = matchRepo("/Users/michael/personal/my-blog", repoLists, gitCache);
     expect(matches).toEqual([]);
   });
 
   it("matches from git remote cache", () => {
-    const gitCache = new Map<string, string>([
-      ["/Users/michael/renamed-folder", "socialbriefhq"],
+    const gitCache = new Map<string, GitRemoteEntry>([
+      ["/Users/michael/renamed-folder", { name: "socialbriefhq", remoteUrl: "git@github.com:org/socialbriefhq.git" }],
     ]);
     const matches = matchRepo("/Users/michael/renamed-folder", repoLists, gitCache);
     expect(matches).toEqual([{ teamUrl: "https://team-b.workers.dev", repoName: "socialbriefhq" }]);
@@ -38,7 +39,7 @@ describe("matchRepo", () => {
       ["https://team-a.workers.dev", ["shared-lib"]],
       ["https://team-b.workers.dev", ["shared-lib"]],
     ]);
-    const gitCache = new Map<string, string>();
+    const gitCache = new Map<string, GitRemoteEntry>();
     const matches = matchRepo("/work/shared-lib", multiTeamRepos, gitCache);
     expect(matches).toHaveLength(2);
     expect(matches[0].teamUrl).toBe("https://team-a.workers.dev");
@@ -46,7 +47,7 @@ describe("matchRepo", () => {
   });
 
   it("handles deeply nested paths", () => {
-    const gitCache = new Map<string, string>();
+    const gitCache = new Map<string, GitRemoteEntry>();
     const matches = matchRepo("/Users/michael/dev/projects/clients/crop2cash", repoLists, gitCache);
     expect(matches).toEqual([{ teamUrl: "https://team-a.workers.dev", repoName: "crop2cash" }]);
   });
