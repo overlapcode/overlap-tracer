@@ -117,6 +117,9 @@ export type SessionParserState = {
   turnNumber: number;
   filesTouched: Set<string>;
   _sessionStartEmitted?: boolean;
+  _gitBranch?: string;
+  _cwd?: string;
+  _branchUpdateEmitted?: boolean;
 };
 
 // ── Team State (polled from instance, cached locally) ────────────────────

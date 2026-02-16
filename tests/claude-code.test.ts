@@ -82,19 +82,47 @@ describe("parseClaudeCodeLine", () => {
       expect(events[0].session_id).toBe("sess_legacy");
     });
 
-    it("does not emit session_start twice", () => {
+    it("does not emit session_start twice when branch is present", () => {
       const state = makeState();
-      const line1 = '{"cwd":"/test","sessionId":"sess_1","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
-      const line2 = '{"cwd":"/test","sessionId":"sess_1","timestamp":"2026-02-10T10:00:01.000Z","message":{"role":"user","content":"hello"}}';
+      const line1 = '{"cwd":"/test","sessionId":"sess_1","gitBranch":"main","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
+      const line2 = '{"cwd":"/test","sessionId":"sess_1","gitBranch":"main","timestamp":"2026-02-10T10:00:01.000Z","message":{"role":"user","content":"hello"}}';
 
       const events1 = parseClaudeCodeLine(line1, "sess_1", state);
       const events2 = parseClaudeCodeLine(line2, "sess_1", state);
 
       expect(events1).toHaveLength(1);
       expect(events1[0].event_type).toBe("session_start");
+      expect(events1[0].git_branch).toBe("main");
       // Second line should be a prompt, not another session_start
       expect(events2).toHaveLength(1);
       expect(events2[0].event_type).toBe("prompt");
+    });
+
+    it("re-emits session_start when branch discovered on later line", () => {
+      const state = makeState();
+      // First line: cwd but no branch
+      const line1 = '{"cwd":"/test","sessionId":"sess_1","timestamp":"2026-02-10T10:00:00.000Z","type":"progress"}';
+      // Second line: user message WITH gitBranch
+      const line2 = '{"cwd":"/test","sessionId":"sess_1","gitBranch":"feature/auth","timestamp":"2026-02-10T10:00:01.000Z","message":{"role":"user","content":"hello"}}';
+      // Third line: another user message (should NOT re-emit session_start again)
+      const line3 = '{"cwd":"/test","sessionId":"sess_1","gitBranch":"feature/auth","timestamp":"2026-02-10T10:00:02.000Z","message":{"role":"user","content":"next"}}';
+
+      const events1 = parseClaudeCodeLine(line1, "sess_1", state);
+      expect(events1).toHaveLength(1);
+      expect(events1[0].event_type).toBe("session_start");
+      expect(events1[0].git_branch).toBeUndefined(); // No branch on first line
+
+      const events2 = parseClaudeCodeLine(line2, "sess_1", state);
+      // Should emit branch-update session_start + prompt
+      expect(events2).toHaveLength(2);
+      expect(events2[0].event_type).toBe("session_start");
+      expect(events2[0].git_branch).toBe("feature/auth");
+      expect(events2[1].event_type).toBe("prompt");
+
+      const events3 = parseClaudeCodeLine(line3, "sess_1", state);
+      // Should only emit prompt, no more session_start
+      expect(events3).toHaveLength(1);
+      expect(events3[0].event_type).toBe("prompt");
     });
   });
 

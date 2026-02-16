@@ -49,16 +49,29 @@ export function parseClaudeCodeLine(
     return [];
   }
 
+  // Capture gitBranch/cwd from any line (they often appear on later lines, not the first)
+  if (parsed.gitBranch && typeof parsed.gitBranch === "string" && !sessionState._gitBranch) {
+    sessionState._gitBranch = parsed.gitBranch;
+  }
+  if (parsed.cwd && typeof parsed.cwd === "string" && !sessionState._cwd) {
+    sessionState._cwd = parsed.cwd;
+  }
+
   // First line with cwd + sessionId → session_start (Claude Code has no system/init line)
   if (parsed.cwd && sessionState.turnNumber === 0 && !sessionState._sessionStartEmitted) {
     sessionState._sessionStartEmitted = true;
+    const branch = sessionState._gitBranch || (parsed.gitBranch as string) || getGitBranch(parsed.cwd as string | undefined);
+    if (branch) {
+      sessionState._gitBranch = branch;
+      sessionState._branchUpdateEmitted = true; // Already have branch, no re-emit needed
+    }
     const startEvent: IngestEvent = {
       event_type: "session_start",
       agent_type: AGENT_TYPE,
       session_id: (parsed.sessionId as string) || (parsed.session_id as string) || sessionId,
       timestamp: (parsed.timestamp as string) || new Date().toISOString(),
       cwd: parsed.cwd as string | undefined,
-      git_branch: (parsed.gitBranch as string) || getGitBranch(parsed.cwd as string | undefined),
+      git_branch: branch,
       model: parsed.model as string | undefined,
       agent_version: parsed.version as string | undefined,
       hostname: hostname(),
@@ -90,6 +103,22 @@ export function parseClaudeCodeLine(
     return [startEvent];
   }
 
+  // If session_start was emitted without a branch, re-emit once we discover it
+  const branchUpdateEvents: IngestEvent[] = [];
+  if (sessionState._sessionStartEmitted && !sessionState._branchUpdateEmitted && sessionState._gitBranch) {
+    sessionState._branchUpdateEmitted = true;
+    branchUpdateEvents.push({
+      event_type: "session_start",
+      agent_type: AGENT_TYPE,
+      session_id: (parsed.sessionId as string) || (parsed.session_id as string) || sessionId,
+      timestamp: (parsed.timestamp as string) || new Date().toISOString(),
+      cwd: sessionState._cwd,
+      git_branch: sessionState._gitBranch,
+      repo_name: "",
+      user_id: "",
+    });
+  }
+
   const message = parsed.message as Record<string, unknown> | undefined;
 
   // User message → prompt
@@ -97,8 +126,8 @@ export function parseClaudeCodeLine(
     const promptText = extractUserPromptText(message.content);
     if (promptText) {
       sessionState.turnNumber++;
-      return [{
-        event_type: "prompt",
+      return [...branchUpdateEvents, {
+        event_type: "prompt" as const,
         agent_type: AGENT_TYPE,
         session_id: (parsed.sessionId as string) || sessionId,
         timestamp: (parsed.timestamp as string) || new Date().toISOString(),
@@ -112,7 +141,7 @@ export function parseClaudeCodeLine(
 
   // Assistant message → agent_response (text/thinking) + file_op (tool_use)
   if (message?.role === "assistant" && Array.isArray(message.content)) {
-    const events: IngestEvent[] = [];
+    const events: IngestEvent[] = [...branchUpdateEvents];
     for (const block of message.content as Record<string, unknown>[]) {
       if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
         events.push({
@@ -149,8 +178,8 @@ export function parseClaudeCodeLine(
   // Result → session_end
   if (parsed.type === "result") {
     const usage = parsed.usage as Record<string, unknown> | undefined;
-    return [{
-      event_type: "session_end",
+    return [...branchUpdateEvents, {
+      event_type: "session_end" as const,
       agent_type: AGENT_TYPE,
       session_id: (parsed.session_id as string) || sessionId,
       timestamp: (parsed.timestamp as string) || new Date().toISOString(),
@@ -168,7 +197,7 @@ export function parseClaudeCodeLine(
     }];
   }
 
-  return [];
+  return branchUpdateEvents;
 }
 
 function extractUserPromptText(content: unknown): string | null {
