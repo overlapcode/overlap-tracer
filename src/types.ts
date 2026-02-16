@@ -1,6 +1,6 @@
 // ── Event Types (shared with Overlap server) ────────────────────────────
 
-export type IngestEventType = "session_start" | "session_end" | "file_op" | "prompt";
+export type IngestEventType = "session_start" | "session_end" | "file_op" | "prompt" | "agent_response";
 
 export type IngestEvent = {
   // Required on ALL events
@@ -35,6 +35,10 @@ export type IngestEvent = {
   // prompt
   prompt_text?: string;
   turn_number?: number;
+
+  // agent_response
+  response_text?: string;
+  response_type?: "text" | "thinking";
 
   // session_end
   total_cost_usd?: number;

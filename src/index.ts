@@ -5,13 +5,13 @@ import { loadCache, setRepoList, saveCache } from "./cache";
 import { verifyToken, fetchRepos } from "./auth";
 import { Tracer, getDaemonPid, signalReload } from "./tracer";
 import { installService, uninstallService, isServiceInstalled } from "./service";
-import { existsSync, unlinkSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { existsSync, unlinkSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -64,8 +64,9 @@ function printUsage(): void {
 
   Usage:
     overlap join [url]  Join a team (or update token for existing team)
-    overlap login       Open dashboard in browser
+    overlap login       Open dashboard in browser (no token needed)
     overlap status      Show tracer status, teams, and repos
+    overlap update      Update to the latest version
     overlap leave       Leave a team
     overlap start       Start the tracer daemon
     overlap stop        Stop the tracer daemon
@@ -187,7 +188,8 @@ async function cmdJoin(): Promise<void> {
   // Set up Claude Code hooks and commands in current directory
   setupHooksAndCommands();
 
-  console.log(`\n  Dashboard: ${instanceUrl}\n`);
+  console.log(`\n  Dashboard: ${instanceUrl}`);
+  console.log(`  Tip: Run 'overlap login' anytime to open the dashboard.\n`);
 }
 
 /**
@@ -397,7 +399,7 @@ async function cmdStatus(): Promise<void> {
     const latestVersion = await updatePromise;
     if (latestVersion) {
       console.log(`\n  Update available: v${VERSION} → v${latestVersion}`);
-      console.log("  Run: curl -fsSL https://overlap.dev/install.sh | sh");
+      console.log("  Run: overlap update");
     }
     console.log("\n  No teams configured. Run 'overlap join' to get started.\n");
     return;
@@ -446,7 +448,7 @@ async function cmdStatus(): Promise<void> {
   const latestVersion = await updatePromise;
   if (latestVersion) {
     console.log(`\n  Update available: v${VERSION} → v${latestVersion}`);
-    console.log("  Run: curl -fsSL https://overlap.dev/install.sh | sh");
+    console.log("  Run: overlap update");
   }
 
   console.log();
@@ -643,6 +645,64 @@ function startDaemonBackground(): void {
   child.unref();
 }
 
+async function cmdUpdate(): Promise<void> {
+  process.stdout.write(`\n  overlap v${VERSION} — checking for updates...`);
+
+  const latest = await checkForUpdate();
+  if (!latest) {
+    console.log(` ✓\n  You're on the latest version.\n`);
+    return;
+  }
+
+  console.log(`\n  Update available: v${VERSION} → v${latest}\n`);
+
+  // Detect platform
+  const os = process.platform === "darwin" ? "darwin" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const assetName = `overlap-${os}-${arch}`;
+  const downloadUrl = `https://github.com/${REPO}/releases/download/v${latest}/${assetName}`;
+
+  // Determine install location (where this binary lives)
+  const currentBinary = process.execPath;
+
+  process.stdout.write(`  Downloading v${latest}...`);
+
+  try {
+    const resp = await fetch(downloadUrl, { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) {
+      console.log(` ✗\n  Download failed: HTTP ${resp.status}`);
+      console.log(`  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
+      return;
+    }
+
+    const buffer = Buffer.from(await resp.arrayBuffer());
+
+    // Write to a temp file first, then replace
+    const tmpPath = `${currentBinary}.tmp`;
+    writeFileSync(tmpPath, buffer, { mode: 0o755 });
+
+    // Atomic replace
+    renameSync(tmpPath, currentBinary);
+
+    console.log(` ✓`);
+
+    // Restart daemon if running
+    const pid = getDaemonPid();
+    if (pid) {
+      process.stdout.write("  Restarting tracer...");
+      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+      await new Promise((r) => setTimeout(r, 1000));
+      startDaemonBackground();
+      console.log(" ✓");
+    }
+
+    console.log(`\n  ✓ Updated to v${latest}\n`);
+  } catch (err) {
+    console.log(` ✗\n  Error: ${err instanceof Error ? err.message : err}`);
+    console.log(`  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
+  }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 const command = process.argv[2];
@@ -652,6 +712,7 @@ switch (command) {
   case "login":     await cmdLogin(); break;
   case "check":     await cmdCheck(); break;
   case "status":    await cmdStatus(); break;
+  case "update":    await cmdUpdate(); break;
   case "leave":     await cmdLeave(); break;
   case "start":     await cmdStart(); break;
   case "stop":      await cmdStop(); break;

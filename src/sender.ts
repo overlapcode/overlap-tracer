@@ -16,6 +16,7 @@ type IngestResponseData = {
   sessions_ended: number;
   file_ops_created: number;
   prompts_created: number;
+  agent_responses_created: number;
 };
 
 const MAX_RETRY_DELAY_MS = 60_000;

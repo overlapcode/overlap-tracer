@@ -110,11 +110,35 @@ export function parseClaudeCodeLine(
     }
   }
 
-  // Assistant message with tool_use → file_op
+  // Assistant message → agent_response (text/thinking) + file_op (tool_use)
   if (message?.role === "assistant" && Array.isArray(message.content)) {
     const events: IngestEvent[] = [];
     for (const block of message.content as Record<string, unknown>[]) {
-      if (block.type === "tool_use") {
+      if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+        events.push({
+          event_type: "agent_response",
+          agent_type: AGENT_TYPE,
+          session_id: (parsed.sessionId as string) || sessionId,
+          timestamp: (parsed.timestamp as string) || new Date().toISOString(),
+          response_text: block.text,
+          response_type: "text",
+          turn_number: sessionState.turnNumber,
+          repo_name: "",
+          user_id: "",
+        });
+      } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+        events.push({
+          event_type: "agent_response",
+          agent_type: AGENT_TYPE,
+          session_id: (parsed.sessionId as string) || sessionId,
+          timestamp: (parsed.timestamp as string) || new Date().toISOString(),
+          response_text: block.thinking,
+          response_type: "thinking",
+          turn_number: sessionState.turnNumber,
+          repo_name: "",
+          user_id: "",
+        });
+      } else if (block.type === "tool_use") {
         const event = extractFileOp(block, parsed, sessionId, sessionState);
         if (event) events.push(event);
       }
