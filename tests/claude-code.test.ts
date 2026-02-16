@@ -148,11 +148,13 @@ describe("parseClaudeCodeLine", () => {
       const line = '{"message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"/a.ts"}},{"type":"tool_use","id":"tu_2","name":"Write","input":{"file_path":"/b.ts"}}]},"timestamp":"2026-02-10T10:00:10.000Z"}';
       const events = parseClaudeCodeLine(line, "sess_123", makeState());
 
-      expect(events).toHaveLength(2);
-      expect(events[0].tool_name).toBe("Read");
-      expect(events[0].operation).toBe("read");
-      expect(events[1].tool_name).toBe("Write");
-      expect(events[1].operation).toBe("create");
+      expect(events).toHaveLength(3);
+      expect(events[0].event_type).toBe("agent_response");
+      expect(events[0].response_text).toBe("Let me check.");
+      expect(events[1].tool_name).toBe("Read");
+      expect(events[1].operation).toBe("read");
+      expect(events[2].tool_name).toBe("Write");
+      expect(events[2].operation).toBe("create");
     });
 
     it("parses Bash tool with command", () => {
@@ -223,13 +225,14 @@ describe("parseClaudeCodeLine", () => {
       const state = makeState();
       const allEvents = lines.flatMap((line) => parseClaudeCodeLine(line, "sess_abc123", state));
 
-      // session_start + prompt (from first user line) + 2 file_ops (Read, Edit) + result
-      expect(allEvents.length).toBe(5);
+      // session_start + prompt + agent_response (text) + file_op (Read) + file_op (Edit) + result
+      expect(allEvents.length).toBe(6);
       expect(allEvents[0].event_type).toBe("session_start");
       expect(allEvents[1].event_type).toBe("prompt");
-      expect(allEvents[2].event_type).toBe("file_op");
+      expect(allEvents[2].event_type).toBe("agent_response");
       expect(allEvents[3].event_type).toBe("file_op");
-      expect(allEvents[4].event_type).toBe("session_end");
+      expect(allEvents[4].event_type).toBe("file_op");
+      expect(allEvents[5].event_type).toBe("session_end");
 
       // All have agent_type
       for (const event of allEvents) {
