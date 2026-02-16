@@ -340,7 +340,10 @@ async function cmdLogin(): Promise<void> {
   try {
     const res = await fetch(`${team.instance_url}/api/v1/auth/login-link`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${team.user_token}` },
+      headers: {
+        Authorization: `Bearer ${team.user_token}`,
+        "Content-Type": "application/json",
+      },
     });
 
     if (res.status === 401) {
