@@ -3,13 +3,14 @@
  * Postinstall script for the overlapdev npm package.
  * Downloads the correct pre-compiled binary for the user's platform.
  */
-import { existsSync, mkdirSync, chmodSync, createWriteStream } from "fs";
+import { existsSync, mkdirSync, chmodSync, createWriteStream, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import https from "https";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = "overlapcode/overlap-tracer";
+const PKG = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
 const BIN_DIR = join(__dirname, "..", "bin");
 const BINARY_PATH = join(BIN_DIR, process.platform === "win32" ? "overlap.exe" : "overlap");
 
@@ -48,21 +49,8 @@ function httpsGet(url) {
   });
 }
 
-async function getLatestVersion() {
-  const res = await httpsGet(`https://api.github.com/repos/${REPO}/releases/latest`);
-  return new Promise((resolve, reject) => {
-    let data = "";
-    res.on("data", (chunk) => (data += chunk));
-    res.on("end", () => {
-      try {
-        const json = JSON.parse(data);
-        resolve(json.tag_name);
-      } catch (e) {
-        reject(e);
-      }
-    });
-    res.on("error", reject);
-  });
+function getVersion() {
+  return `v${PKG.version}`;
 }
 
 async function download(url, dest) {
@@ -84,14 +72,7 @@ async function main() {
   const target = getPlatformTarget();
   console.log(`[overlap] Downloading binary for ${process.platform}-${process.arch}...`);
 
-  let version;
-  try {
-    version = await getLatestVersion();
-  } catch {
-    console.warn("[overlap] Could not determine latest version. Skipping binary download.");
-    console.warn("[overlap] You can download manually from: https://github.com/overlapcode/overlap-tracer/releases");
-    return;
-  }
+  const version = getVersion();
 
   const url = `https://github.com/${REPO}/releases/download/${version}/${target}`;
 
