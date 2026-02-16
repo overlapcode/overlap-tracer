@@ -33,6 +33,8 @@ export class Tracer {
   private stateFlushTimer: ReturnType<typeof setInterval> | null = null;
   private teamStatePollTimer: ReturnType<typeof setInterval> | null = null;
   private shuttingDown = false;
+  // In-memory read positions — only committed to byte_offset after events are flushed
+  private readHeads = new Map<string, number>();
 
   sender: EventSender;
 
@@ -123,11 +125,22 @@ export class Tracer {
   }
 
   saveState(): void {
-    // Update tracked files from session parser states
+    // Commit read heads to byte_offsets only if no events are pending
+    // If events are pending (server down), keep byte_offset behind so
+    // events are re-read on daemon restart
+    const hasPending = this.sender.getPendingCount() > 0;
+
     for (const [filePath, sessionState] of this.sessionStates) {
       const tracked = getTrackedFile(this.state, filePath);
       if (tracked) {
         updateFromParserState(tracked, sessionState);
+        // Only advance persisted byte_offset if all events have been flushed
+        if (!hasPending) {
+          const readHead = this.readHeads.get(filePath);
+          if (readHead !== undefined) {
+            tracked.byte_offset = readHead;
+          }
+        }
       }
     }
     saveState(this.state);
@@ -161,6 +174,11 @@ export class Tracer {
         if (this.teamStatePollTimer) clearInterval(this.teamStatePollTimer);
 
         await this.sender.flushAll(5000);
+        // After final flush, commit all read heads regardless of pending state
+        for (const [filePath, readHead] of this.readHeads) {
+          const tracked = getTrackedFile(this.state, filePath);
+          if (tracked) tracked.byte_offset = readHead;
+        }
         this.saveState();
         this.removePidFile();
         console.log("[tracer] Clean shutdown complete.");
@@ -264,10 +282,13 @@ export class Tracer {
       return;
     }
 
-    // If we've already read to the end, nothing new
-    if (tracked && tracked.byte_offset >= fileSize) return;
+    // Use readHead (in-memory) if available, otherwise fall back to persisted byte_offset
+    const currentOffset = this.readHeads.get(filePath) ?? tracked?.byte_offset ?? 0;
 
-    const startOffset = tracked?.byte_offset ?? 0;
+    // If we've already read to the end, nothing new
+    if (currentOffset >= fileSize) return;
+
+    const startOffset = currentOffset;
 
     // Read new bytes
     let newContent: string;
@@ -399,8 +420,8 @@ export class Tracer {
       }
     }
 
-    // Update byte offset
-    tracked!.byte_offset = startOffset + Buffer.byteLength(newContent, "utf-8");
+    // Advance read head in memory (NOT byte_offset — that's committed on flush)
+    this.readHeads.set(filePath, startOffset + Buffer.byteLength(newContent, "utf-8"));
     updateFromParserState(tracked!, sessionState);
   }
 

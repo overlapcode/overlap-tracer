@@ -562,10 +562,33 @@ async function cmdDaemon(): Promise<void> {
     process.exit(1);
   }
 
+  // Kill any other overlap daemon processes before starting
+  killOtherDaemons();
+
   const tracer = new Tracer();
   await tracer.start();
 
   // Keep alive — the event loop stays open from watchers and timers
+}
+
+/**
+ * Kill any other `overlap daemon` processes besides ourselves.
+ * Prevents duplicate daemons from launchd KeepAlive + manual starts.
+ */
+function killOtherDaemons(): void {
+  const myPid = process.pid;
+  try {
+    const output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== myPid);
+    for (const pid of pids) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    }
+    if (pids.length > 0) {
+      console.log(`[daemon] Killed ${pids.length} stale daemon process(es).`);
+    }
+  } catch {
+    // pgrep returns non-zero if no matches — that's fine
+  }
 }
 
 async function cmdDebug(): Promise<void> {
