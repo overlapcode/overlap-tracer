@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.4.1";
+const VERSION = "1.4.2";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
