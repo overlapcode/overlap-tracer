@@ -20,6 +20,7 @@ type IngestResponseData = {
 };
 
 const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_RETRIES = 5;
 
 export class EventSender {
   private batches = new Map<string, PendingBatch>();
@@ -140,9 +141,17 @@ export class EventSender {
   }
 
   private requeueWithBackoff(batch: PendingBatch, events: IngestEvent[]): void {
+    batch.retryCount++;
+
+    // Drop events after max retries to prevent infinite accumulation
+    if (batch.retryCount > MAX_RETRIES) {
+      console.warn(`[${batch.teamUrl}] Dropping ${events.length} events after ${MAX_RETRIES} retries`);
+      batch.retryCount = 0;
+      return;
+    }
+
     // Put events back at the front
     batch.events = [...events, ...batch.events];
-    batch.retryCount++;
 
     const delay = Math.min(
       this.batchIntervalMs * Math.pow(2, batch.retryCount),

@@ -8,7 +8,7 @@ const CONFIG_PATH = join(OVERLAP_DIR, "config.json");
 
 const DEFAULT_TRACER_SETTINGS: TracerSettings = {
   batch_interval_ms: 2000,
-  max_batch_size: 50,
+  max_batch_size: 25,
   repo_sync_interval_ms: 300_000,
 };
 
