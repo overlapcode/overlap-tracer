@@ -143,6 +143,7 @@ export type TeamStateSession = {
   started_at: string;
   summary: string | null;
   regions: TeamStateRegion[];
+  instance_url: string;
 };
 
 export type TeamState = {

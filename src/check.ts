@@ -1,18 +1,30 @@
 /**
- * overlap check — PreToolUse hook handler for real-time coordination.
+ * overlap check — PreToolUse hook handler + CLI overlap detection.
  *
- * Reads team-state.json, compares against the target file,
- * and outputs structured JSON for Claude Code's additionalContext.
+ * Two modes:
+ *   1. Hook mode (no flags): reads JSON from stdin (Claude Code hook protocol),
+ *      outputs hookSpecificOutput JSON to stdout.
+ *   2. CLI mode (--json, --repo, --file, --all): called by skills or manually,
+ *      outputs structured JSON to stdout.
  *
- * Input: JSON from stdin (Claude Code hook protocol)
- * Output: JSON to stdout with hookSpecificOutput (or silent exit 0)
+ * Exits silently (exit 0) when:
+ *   - No config / no teams configured
+ *   - Not in a git repo (global hook firing in non-git dir)
+ *   - No team-state.json (daemon not running) — in hook mode
+ *   - No overlaps found
  */
 
-import { readFileSync } from "fs";
-import { basename, resolve } from "path";
+import { readFileSync, existsSync } from "fs";
+import { basename, resolve, relative } from "path";
 import { execSync } from "child_process";
-import { readTeamState } from "./team-state";
+import { join } from "path";
+import { homedir } from "os";
+import { readTeamState, TEAM_STATE_PATH } from "./team-state";
 import { loadConfig } from "./config";
+import { findEnclosingFunction } from "./enrichment";
+import type { TeamState, TeamStateSession } from "./types";
+
+// ── Types ────────────────────────────────────────────────────────────────
 
 type HookInput = {
   session_id: string;
@@ -28,6 +40,20 @@ type HookInput = {
   };
 };
 
+type CheckFlags = {
+  json: boolean;
+  repo: string | null;
+  file: string | null;
+  all: boolean;
+};
+
+type GitInfo = {
+  repoName: string;
+  gitHost: "github" | "gitlab" | null;
+  remoteUrl: string;
+  gitRoot: string;
+};
+
 type OverlapMatch = {
   display_name: string;
   session_id: string;
@@ -39,68 +65,139 @@ type OverlapMatch = {
   end_line: number | null;
   function_name: string | null;
   tier: "line" | "function" | "adjacent" | "file";
+  session_url: string;
 };
 
-/**
- * Run the check command. Called from CLI dispatcher.
- */
+// ── Main ─────────────────────────────────────────────────────────────────
+
 export async function cmdCheck(): Promise<void> {
-  // Read hook input from stdin
-  let input: HookInput;
-  try {
-    const raw = readFileSync(0, "utf-8"); // fd 0 = stdin
-    input = JSON.parse(raw);
-  } catch {
-    // No stdin or invalid JSON — silent exit
+  // Parse CLI args
+  const args = process.argv.slice(3); // after "overlap check"
+  const flags = parseCheckArgs(args);
+
+  // Early bail: no config = no teams = nothing to check
+  const configPath = join(homedir(), ".overlap", "config.json");
+  if (!existsSync(configPath)) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    process.exit(0);
+  }
+  const config = loadConfig();
+  if (config.teams.length === 0) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
-  // Extract file path from tool input
-  const filePath = input.tool_input.file_path
-    || input.tool_input.notebook_path
-    || null;
+  // Determine mode: stdin (hook) or CLI args (skill)
+  let input: HookInput | null = null;
 
-  if (!filePath) {
-    // No file path (e.g., Bash command) — nothing to check
+  if (!flags.file && !flags.repo && !flags.all) {
+    // Hook mode: read from stdin
+    try {
+      const raw = readFileSync(0, "utf-8"); // fd 0 = stdin
+      input = JSON.parse(raw);
+    } catch {
+      // No stdin or invalid JSON — not a hook invocation, bail silently
+      process.exit(0);
+    }
+  }
+
+  // Resolve parameters
+  const cwd = input?.cwd || process.cwd();
+  const gitInfo = getGitInfo(cwd);
+  const repoName = flags.repo || gitInfo?.repoName || null;
+
+  // Not in a git repo and no --repo flag — global hook in non-git dir
+  if (!repoName && !flags.all) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
   // Read team state cache
   const state = readTeamState();
-  if (!state || state.sessions.length === 0) {
+  if (!state) {
+    if (!existsSync(TEAM_STATE_PATH)) {
+      // File doesn't exist — daemon likely not running
+      if (flags.json) {
+        outputJson({
+          overlaps: [],
+          team_sessions: [],
+          warning: "team-state.json not found. Is the overlap daemon running?",
+        });
+      }
+      // Hook mode: silent, don't block the user
+    } else {
+      // File exists but is stale (>2 min old)
+      if (flags.json) {
+        outputJson({
+          overlaps: [],
+          team_sessions: [],
+          warning: "Team state is stale (>2 min). The daemon may have stopped.",
+        });
+      }
+    }
+    process.exit(0);
+  }
+  if (state.sessions.length === 0) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
-  // Determine current repo name
-  const repoName = detectRepoName(input.cwd);
-  if (!repoName) {
-    process.exit(0);
-  }
-
-  // Determine current user to exclude self
-  const config = loadConfig();
+  // Exclude own sessions
   const currentUserIds = new Set(config.teams.map((t) => t.user_id));
 
-  // Resolve file path relative to cwd
-  const relPath = filePath.startsWith("/")
-    ? filePath.replace(input.cwd + "/", "")
-    : filePath;
+  // --all mode: return all teammate sessions (for overlap-context skill)
+  if (flags.all) {
+    outputAllSessions(state, currentUserIds, flags.json);
+    process.exit(0);
+  }
 
-  // Resolve target line range from old_string (for Edit)
+  // Extract file path
+  const filePath =
+    flags.file ||
+    input?.tool_input?.file_path ||
+    input?.tool_input?.notebook_path ||
+    null;
+
+  if (!filePath) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    process.exit(0);
+  }
+
+  // Normalize file path to git-root-relative
+  const gitRoot = gitInfo?.gitRoot || cwd;
+  const absFilePath = resolve(cwd, filePath);
+  const relPath = relative(gitRoot, absFilePath);
+
+  // File is outside the repo — nothing to check
+  if (relPath.startsWith("..")) {
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    process.exit(0);
+  }
+
+  // Resolve target line range + function from old_string (for Edit tool)
   let targetStartLine: number | null = null;
   let targetEndLine: number | null = null;
-  if (input.tool_input.old_string && filePath) {
+  let targetFunctionName: string | null = null;
+
+  if (input?.tool_input?.old_string && filePath) {
     try {
-      const absPath = resolve(input.cwd, filePath);
-      const content = readFileSync(absPath, "utf-8");
+      const content = readFileSync(absFilePath, "utf-8");
       const idx = content.indexOf(input.tool_input.old_string);
       if (idx !== -1) {
         const before = content.substring(0, idx);
         targetStartLine = before.split("\n").length;
-        targetEndLine = targetStartLine + input.tool_input.old_string.split("\n").length - 1;
+        targetEndLine =
+          targetStartLine +
+          input.tool_input.old_string.split("\n").length -
+          1;
+
+        // Resolve enclosing function for the target edit
+        const lines = content.split("\n");
+        targetFunctionName =
+          findEnclosingFunction(lines, targetStartLine - 1) || null;
       }
     } catch {
-      // File not readable
+      // File not readable — proceed without line data
     }
   }
 
@@ -120,11 +217,16 @@ export async function cmdCheck(): Promise<void> {
       let tier: OverlapMatch["tier"] = "file";
 
       if (
-        targetStartLine != null && targetEndLine != null &&
-        region.start_line != null && region.end_line != null
+        targetStartLine != null &&
+        targetEndLine != null &&
+        region.start_line != null &&
+        region.end_line != null
       ) {
         // Check line overlap
-        if (targetStartLine <= region.end_line && targetEndLine >= region.start_line) {
+        if (
+          targetStartLine <= region.end_line &&
+          targetEndLine >= region.start_line
+        ) {
           tier = "line";
         } else {
           // Check adjacency (within 30 lines)
@@ -138,11 +240,15 @@ export async function cmdCheck(): Promise<void> {
         }
       }
 
-      // Check function overlap (if both have function names)
-      if (tier === "file" && region.function_name) {
-        // We'd need to resolve the target function too, but for now
-        // function-level detection happens server-side. Keep as file tier.
+      // Function tier: both sides have function names and they match
+      if (tier === "file" && region.function_name && targetFunctionName) {
+        if (region.function_name === targetFunctionName) {
+          tier = "function";
+        }
       }
+
+      const sessionUrl =
+        session.instance_url || state.instance_url || "";
 
       matches.push({
         display_name: session.display_name,
@@ -155,12 +261,15 @@ export async function cmdCheck(): Promise<void> {
         end_line: region.end_line,
         function_name: region.function_name,
         tier,
+        session_url: sessionUrl
+          ? `${sessionUrl}/session/${session.session_id}`
+          : "",
       });
     }
   }
 
   if (matches.length === 0) {
-    // No overlaps — silent exit, don't block
+    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
@@ -168,8 +277,143 @@ export async function cmdCheck(): Promise<void> {
   const tierOrder = { line: 0, function: 1, adjacent: 2, file: 3 };
   matches.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier]);
 
-  // Build context message
-  const instanceUrl = state.instance_url;
+  // Output
+  if (flags.json) {
+    outputJson({
+      overlaps: matches,
+      git_host: gitInfo?.gitHost || null,
+    });
+    process.exit(0);
+  }
+
+  // Hook mode: hookSpecificOutput for Claude Code
+  outputHookFormat(matches, relPath, gitInfo);
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+function parseCheckArgs(args: string[]): CheckFlags {
+  const flags: CheckFlags = { json: false, repo: null, file: null, all: false };
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--json":
+        flags.json = true;
+        break;
+      case "--repo":
+        flags.repo = args[++i] || null;
+        break;
+      case "--file":
+        flags.file = args[++i] || null;
+        break;
+      case "--all":
+        flags.all = true;
+        break;
+    }
+  }
+  return flags;
+}
+
+/**
+ * Single git call to get repo name, host, remote URL, and root.
+ * Returns null if not in a git repo.
+ */
+function getGitInfo(cwd: string): GitInfo | null {
+  try {
+    const gitRoot = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+      .toString()
+      .trim();
+
+    // Get remote URL (single call, may not exist)
+    let remoteUrl = "";
+    try {
+      remoteUrl = execSync("git remote get-url origin", {
+        cwd,
+        timeout: 3000,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+        .toString()
+        .trim();
+    } catch {
+      // No remote — still a valid git repo
+    }
+
+    // Extract repo name from remote URL
+    let repoName: string | null = null;
+    if (remoteUrl) {
+      const match = remoteUrl.match(/[/:]([^/:]+?)(?:\.git)?$/);
+      if (match) repoName = match[1];
+    }
+    // Fallback: use git root directory name (NOT arbitrary cwd basename)
+    if (!repoName) {
+      repoName = basename(gitRoot);
+    }
+
+    // Detect host
+    let gitHost: "github" | "gitlab" | null = null;
+    if (remoteUrl.includes("github.com")) gitHost = "github";
+    else if (remoteUrl.includes("gitlab")) gitHost = "gitlab";
+
+    return { repoName, gitHost, remoteUrl, gitRoot };
+  } catch {
+    // Not a git repo
+    return null;
+  }
+}
+
+function outputJson(data: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(data));
+}
+
+function outputAllSessions(
+  state: TeamState,
+  currentUserIds: Set<string>,
+  jsonMode: boolean,
+): void {
+  const sessions = state.sessions.filter(
+    (s) => !currentUserIds.has(s.user_id),
+  );
+
+  if (jsonMode) {
+    outputJson({
+      overlaps: [],
+      team_sessions: sessions.map((s) => ({
+        display_name: s.display_name,
+        session_id: s.session_id,
+        repo_name: s.repo_name,
+        started_at: s.started_at,
+        summary: s.summary,
+        session_url: `${s.instance_url || state.instance_url}/session/${s.session_id}`,
+        regions: s.regions,
+      })),
+    });
+  } else {
+    // Human-readable fallback
+    if (sessions.length === 0) {
+      console.log("No active teammate sessions.");
+    } else {
+      for (const s of sessions) {
+        const ago = formatAgo(s.started_at);
+        console.log(`${s.display_name} — ${s.repo_name} (${ago})`);
+        if (s.summary) console.log(`  ${s.summary}`);
+        for (const r of s.regions) {
+          const fn = r.function_name ? ` → ${r.function_name}()` : "";
+          console.log(`  ${r.file_path}${fn}`);
+        }
+        console.log();
+      }
+    }
+  }
+}
+
+function outputHookFormat(
+  matches: OverlapMatch[],
+  relPath: string,
+  gitInfo: GitInfo | null,
+): void {
   const lines: string[] = [];
 
   for (const m of matches) {
@@ -184,8 +428,8 @@ export async function cmdCheck(): Promise<void> {
     lines.push("");
     lines.push(`${m.display_name} is actively editing ${regionDesc}.`);
     lines.push(`Session started ${ago}.`);
-    if (instanceUrl) {
-      lines.push(`Session: ${instanceUrl}/session/${m.session_id}`);
+    if (m.session_url) {
+      lines.push(`Session: ${m.session_url}`);
     }
     if (m.summary) {
       lines.push(`Session summary: "${m.summary}"`);
@@ -193,27 +437,31 @@ export async function cmdCheck(): Promise<void> {
     lines.push("");
   }
 
-  // Add recommendation
-  const hasHardOverlap = matches.some((m) => m.tier === "line" || m.tier === "function");
+  // Recommendation
+  const hasHardOverlap = matches.some(
+    (m) => m.tier === "line" || m.tier === "function",
+  );
   if (hasHardOverlap) {
-    lines.push("Recommendation: Review the other session before modifying this region. If the work conflicts, coordinate with the other developer.");
+    lines.push(
+      "Recommendation: Review the other session before modifying this region. If the work conflicts, coordinate with the other developer.",
+    );
   } else {
-    lines.push("Note: Another developer is working in the same file. Proceed with awareness.");
+    lines.push(
+      "Note: Another developer is working in the same file. Proceed with awareness.",
+    );
   }
 
-  // Add PR check suggestion
-  const gitHost = detectGitHost(input.cwd);
-  if (gitHost === "github") {
+  // PR check suggestion
+  if (gitInfo?.gitHost === "github") {
     lines.push("");
     lines.push("Also check for existing PRs that may cover this work:");
     lines.push(`  gh pr list --search "${relPath}" --state open --limit 5`);
-  } else if (gitHost === "gitlab") {
+  } else if (gitInfo?.gitHost === "gitlab") {
     lines.push("");
     lines.push("Also check for existing MRs that may cover this work:");
     lines.push(`  glab mr list --search "${relPath}" --state opened`);
   }
 
-  // Output structured JSON for Claude Code
   const output = {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -232,32 +480,4 @@ function formatAgo(iso: string): string {
   if (min < 60) return `${min} min ago`;
   const hrs = Math.floor(min / 60);
   return `${hrs}h ${min % 60}m ago`;
-}
-
-function detectRepoName(cwd: string): string | null {
-  // Try git remote first
-  try {
-    const url = execSync("git remote get-url origin", { cwd, timeout: 3000 })
-      .toString()
-      .trim();
-    const match = url.match(/[/:]([^/:]+?)(?:\.git)?$/);
-    if (match) return match[1];
-  } catch {
-    // Not a git repo or no remote
-  }
-  // Fall back to directory basename
-  return basename(cwd);
-}
-
-function detectGitHost(cwd: string): "github" | "gitlab" | null {
-  try {
-    const url = execSync("git remote get-url origin", { cwd, timeout: 3000 })
-      .toString()
-      .trim();
-    if (url.includes("github.com")) return "github";
-    if (url.includes("gitlab.com") || url.includes("gitlab")) return "gitlab";
-  } catch {
-    // Not a git repo
-  }
-  return null;
 }

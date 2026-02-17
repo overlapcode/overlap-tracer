@@ -185,81 +185,29 @@ async function cmdJoin(): Promise<void> {
     }
   }
 
-  // Set up Claude Code hooks and commands in current directory
-  setupHooksAndCommands();
+  // Set up global Claude Code hooks and skills
+  setupGlobalHooksAndSkills();
 
   console.log(`\n  Dashboard: ${instanceUrl}`);
   console.log(`  Tip: Run 'overlap login' anytime to open the dashboard.\n`);
 }
 
 /**
- * Set up Claude Code hooks and commands in the current working directory.
- * Creates .claude/scripts/overlap-hook.sh, .claude/commands/, and merges hooks into settings.json.
+ * Set up Claude Code hooks and skills globally in ~/.claude/.
+ * Merges PreToolUse hook into ~/.claude/settings.json and creates
+ * skill files for overlap-check and overlap-context.
+ * Skips if ~/.claude/ doesn't exist (user doesn't have Claude Code).
  */
-function setupHooksAndCommands(): void {
-  const cwd = process.cwd();
-  const claudeDir = join(cwd, ".claude");
+function setupGlobalHooksAndSkills(): void {
+  const claudeDir = join(homedir(), ".claude");
 
-  // Only set up if this looks like a project directory (has .git or package.json etc.)
-  if (!existsSync(join(cwd, ".git")) && !existsSync(join(cwd, "package.json"))) {
+  // Only set up if user has Claude Code installed
+  if (!existsSync(claudeDir)) {
     return;
   }
 
   try {
-    // Create directories
-    const scriptsDir = join(claudeDir, "scripts");
-    const commandsDir = join(claudeDir, "commands");
-    mkdirSync(scriptsDir, { recursive: true });
-    mkdirSync(commandsDir, { recursive: true });
-
-    // Write hook script (graceful fallback when overlap not installed)
-    const hookScript = `#!/usr/bin/env sh
-# Overlap coordination hook — silently skips if overlap is not installed
-command -v overlap >/dev/null 2>&1 || exit 0
-overlap check
-`;
-    writeFileSync(join(scriptsDir, "overlap-hook.sh"), hookScript, { mode: 0o755 });
-
-    // Write overlap-check command
-    const checkCommand = `Check if anyone on your team is currently working on the same files or
-code regions. Run:
-
-  overlap check --repo $(basename $(git rev-parse --toplevel)) --json
-
-Parse the JSON output. For each overlap found, report:
-- Who is working on the overlapping file/region
-- What function or line range they're editing
-- A direct link to their session
-- Their session summary
-
-Then check for existing PRs that may cover the same work:
-- If the git remote contains github.com: run \`gh pr list --state open --limit 10\`
-- If the git remote contains gitlab.com: run \`glab mr list --state opened\`
-- Otherwise skip the PR check
-
-If no overlaps and no related PRs, confirm the coast is clear.
-`;
-    writeFileSync(join(commandsDir, "overlap-check.md"), checkCommand);
-
-    // Write overlap-context command
-    const contextCommand = `Load what your team is currently working on for awareness throughout
-this session. Run:
-
-  overlap check --repo $(basename $(git rev-parse --toplevel)) --json
-
-Parse the JSON output and present a brief team status:
-- For each active session: who, repo, session summary, how long ago
-  it started, and which files/functions they have touched
-- Highlight any files that overlap with the current repository
-
-Keep this context in mind. When you are about to edit a file that someone
-else is actively working on, mention it before proceeding.
-
-If no active sessions, confirm the team is clear.
-`;
-    writeFileSync(join(commandsDir, "overlap-context.md"), contextCommand);
-
-    // Merge hooks into .claude/settings.json
+    // ── 1. Merge hook into ~/.claude/settings.json ──
     const settingsPath = join(claudeDir, "settings.json");
     let settings: Record<string, unknown> = {};
     if (existsSync(settingsPath)) {
@@ -270,22 +218,22 @@ If no active sessions, confirm the team is clear.
       }
     }
 
-    // Ensure hooks structure exists
     if (!settings.hooks || typeof settings.hooks !== "object") {
       settings.hooks = {};
     }
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // Check if our hook is already present
     if (!hooks.PreToolUse) {
       hooks.PreToolUse = [];
     }
     const preToolUse = hooks.PreToolUse as Array<Record<string, unknown>>;
 
+    // Check if overlap hook already present (matches both old .sh and new direct command)
     const hasOverlapHook = preToolUse.some((entry) => {
       const innerHooks = entry.hooks as Array<Record<string, unknown>> | undefined;
-      return innerHooks?.some((h) =>
-        typeof h.command === "string" && h.command.includes("overlap-hook.sh")
+      return innerHooks?.some(
+        (h) =>
+          typeof h.command === "string" && h.command.includes("overlap"),
       );
     });
 
@@ -295,7 +243,7 @@ If no active sessions, confirm the team is clear.
         hooks: [
           {
             type: "command",
-            command: ".claude/scripts/overlap-hook.sh",
+            command: "overlap check",
             timeout: 10,
           },
         ],
@@ -304,10 +252,299 @@ If no active sessions, confirm the team is clear.
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
-    console.log("  ✓ Claude Code coordination hooks installed");
+    // ── 2. Create overlap-check skill ──
+    const checkSkillDir = join(claudeDir, "skills", "overlap-check");
+    mkdirSync(checkSkillDir, { recursive: true });
+
+    writeFileSync(
+      join(checkSkillDir, "SKILL.md"),
+      `---
+name: overlap-check
+description: Check if any teammate is currently working on the same files or code regions. Use when about to edit shared code, before starting work on a file, or when the user asks to check for overlaps.
+allowed-tools: Bash, Read
+---
+
+# Overlap Check
+
+Check for active teammate sessions that overlap with your current work.
+
+## When to Use
+
+- Before editing a file that might be shared
+- User asks "is anyone else working on this?"
+- User says "check for overlaps" or "overlap check"
+- Starting work on a critical shared module
+
+## Step 1: Run the check
+
+\`\`\`bash
+overlap check --json --repo $(basename $(git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+\`\`\`
+
+If you want to check a specific file:
+
+\`\`\`bash
+overlap check --json --file <relative-path>
+\`\`\`
+
+## Step 2: Parse the JSON output
+
+The output has this structure:
+
+\`\`\`json
+{
+  "overlaps": [
+    {
+      "display_name": "Alice",
+      "session_id": "abc123",
+      "repo_name": "my-repo",
+      "file_path": "src/index.ts",
+      "tier": "line|function|adjacent|file",
+      "function_name": "handleRequest",
+      "start_line": 42,
+      "end_line": 58,
+      "session_url": "https://app.example.com/session/abc123",
+      "summary": "Refactoring auth middleware"
+    }
+  ],
+  "git_host": "github|gitlab|null",
+  "warning": "optional warning message"
+}
+\`\`\`
+
+## Step 3: Report findings
+
+For each overlap:
+- **Who** is working there (display_name)
+- **What** they are editing (file, function, line range)
+- **Tier** severity: line (direct conflict) > function (same function) > adjacent (nearby) > file (same file)
+- **Link** to their session (session_url)
+- **Summary** of what they are doing
+
+## Step 4: Check for related PRs
+
+If \`git_host\` is "github":
+\`\`\`bash
+gh pr list --state open --limit 10
+\`\`\`
+
+If \`git_host\` is "gitlab":
+\`\`\`bash
+glab mr list --state opened
+\`\`\`
+
+## Step 5: Recommendation
+
+- **Line/function overlap**: Warn strongly. Suggest reviewing the other session first and coordinating.
+- **Adjacent/file overlap**: Note for awareness. Proceed with caution.
+- **No overlaps, no related PRs**: Confirm the coast is clear.
+- **Warning present**: Mention it (e.g., daemon not running).
+`,
+    );
+
+    // ── 3. Create overlap-context skill ──
+    const contextSkillDir = join(claudeDir, "skills", "overlap-context");
+    mkdirSync(contextSkillDir, { recursive: true });
+
+    writeFileSync(
+      join(contextSkillDir, "SKILL.md"),
+      `---
+name: overlap-context
+description: Load team context - see what all teammates are currently working on across all repos. Use at session start, when user asks "what is the team doing", or to maintain awareness throughout a session.
+allowed-tools: Bash
+---
+
+# Overlap Team Context
+
+Load a summary of all active teammate sessions for awareness.
+
+## When to Use
+
+- Start of a session (team awareness)
+- User asks "what is the team working on?"
+- User says "overlap context" or "team status"
+- Before starting a large refactor
+
+## Step 1: Fetch all sessions
+
+\`\`\`bash
+overlap check --json --all
+\`\`\`
+
+## Step 2: Parse the JSON output
+
+\`\`\`json
+{
+  "overlaps": [],
+  "team_sessions": [
+    {
+      "display_name": "Alice",
+      "session_id": "abc123",
+      "repo_name": "my-repo",
+      "started_at": "2025-01-15T10:30:00Z",
+      "summary": "Building user dashboard",
+      "session_url": "https://...",
+      "regions": [
+        { "file_path": "src/dashboard.tsx", "function_name": "Dashboard", "start_line": 1, "end_line": 45 }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+## Step 3: Present team status
+
+For each active session:
+- **Who**: display_name
+- **Repo**: repo_name
+- **What**: summary and files/functions they have touched
+- **When**: how long ago the session started
+- **Link**: session_url
+
+Highlight any files in the same repository as the current working directory.
+
+## Step 4: Keep context in mind
+
+When you are about to edit a file that a teammate is actively working on,
+mention it proactively before proceeding.
+
+If no active sessions, confirm the team is clear.
+`,
+    );
+
+    console.log("  ✓ Claude Code coordination hooks + skills installed");
+
+    // ── 4. Migrate: clean up old per-project hooks if present in CWD ──
+    migrateOldProjectHooks();
   } catch (err) {
     // Non-fatal: hooks are optional enhancement
-    console.log(`  Note: Could not set up Claude Code hooks: ${err instanceof Error ? err.message : "unknown error"}`);
+    console.log(
+      `  Note: Could not set up Claude Code hooks: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
+  }
+}
+
+/**
+ * Remove Overlap hooks and skills from ~/.claude/.
+ * Called by uninstall and leave (when last team removed).
+ */
+function removeGlobalHooksAndSkills(): void {
+  const claudeDir = join(homedir(), ".claude");
+  if (!existsSync(claudeDir)) return;
+
+  try {
+    // Remove hook from settings.json
+    const settingsPath = join(claudeDir, "settings.json");
+    if (existsSync(settingsPath)) {
+      const settings = JSON.parse(
+        readFileSync(settingsPath, "utf-8"),
+      ) as Record<string, unknown>;
+      const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+
+      if (hooks?.PreToolUse) {
+        const preToolUse = hooks.PreToolUse as Array<
+          Record<string, unknown>
+        >;
+        hooks.PreToolUse = preToolUse.filter((entry) => {
+          const innerHooks = entry.hooks as
+            | Array<Record<string, unknown>>
+            | undefined;
+          return !innerHooks?.some(
+            (h) =>
+              typeof h.command === "string" &&
+              h.command.includes("overlap"),
+          );
+        });
+        if ((hooks.PreToolUse as unknown[]).length === 0) {
+          delete hooks.PreToolUse;
+        }
+        // Clean up empty hooks object
+        if (Object.keys(hooks).length === 0) {
+          delete settings.hooks;
+        }
+        writeFileSync(
+          settingsPath,
+          JSON.stringify(settings, null, 2) + "\n",
+        );
+      }
+    }
+
+    // Remove skill directories
+    const checkSkillDir = join(claudeDir, "skills", "overlap-check");
+    if (existsSync(checkSkillDir)) {
+      rmSync(checkSkillDir, { recursive: true, force: true });
+    }
+    const contextSkillDir = join(claudeDir, "skills", "overlap-context");
+    if (existsSync(contextSkillDir)) {
+      rmSync(contextSkillDir, { recursive: true, force: true });
+    }
+
+    console.log("  ✓ Removed Claude Code hooks and skills");
+  } catch (err) {
+    console.log(
+      `  Note: Could not clean up Claude Code hooks: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
+  }
+}
+
+/**
+ * Clean up old per-project .claude/scripts/overlap-hook.sh and .claude/commands/overlap-*.md
+ * if present in the current working directory. Best-effort migration.
+ */
+function migrateOldProjectHooks(): void {
+  try {
+    const cwd = process.cwd();
+    const localClaudeDir = join(cwd, ".claude");
+    const localHookScript = join(localClaudeDir, "scripts", "overlap-hook.sh");
+
+    if (!existsSync(localHookScript)) return;
+
+    unlinkSync(localHookScript);
+
+    // Remove old per-project hook from local settings.json
+    const localSettingsPath = join(localClaudeDir, "settings.json");
+    if (existsSync(localSettingsPath)) {
+      const localSettings = JSON.parse(
+        readFileSync(localSettingsPath, "utf-8"),
+      ) as Record<string, unknown>;
+      const localHooks = (localSettings.hooks as Record<string, unknown[]>)
+        ?.PreToolUse as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(localHooks)) {
+        const hooks = localSettings.hooks as Record<string, unknown[]>;
+        hooks.PreToolUse = localHooks.filter((entry) => {
+          const innerHooks = entry.hooks as
+            | Array<Record<string, unknown>>
+            | undefined;
+          return !innerHooks?.some(
+            (h) =>
+              typeof h.command === "string" &&
+              h.command.includes("overlap-hook.sh"),
+          );
+        });
+        if ((hooks.PreToolUse as unknown[]).length === 0) {
+          delete hooks.PreToolUse;
+        }
+        if (Object.keys(hooks).length === 0) {
+          delete localSettings.hooks;
+        }
+        writeFileSync(
+          localSettingsPath,
+          JSON.stringify(localSettings, null, 2) + "\n",
+        );
+      }
+    }
+
+    // Clean up old command files
+    const oldCheckCmd = join(localClaudeDir, "commands", "overlap-check.md");
+    const oldContextCmd = join(
+      localClaudeDir,
+      "commands",
+      "overlap-context.md",
+    );
+    if (existsSync(oldCheckCmd)) unlinkSync(oldCheckCmd);
+    if (existsSync(oldContextCmd)) unlinkSync(oldContextCmd);
+  } catch {
+    // Migration is best-effort
   }
 }
 
@@ -494,6 +731,8 @@ async function cmdLeave(): Promise<void> {
       console.log("  Stopping tracer...");
       try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
     }
+    // Clean up Claude Code hooks and skills
+    removeGlobalHooksAndSkills();
     console.log(`  ✓ Left "${teamToLeave.name}". No teams remaining.\n`);
   } else {
     // Reload daemon with updated config
@@ -616,6 +855,9 @@ async function cmdUninstall(): Promise<void> {
     try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
     console.log("  ✓ Stopped tracer daemon");
   }
+
+  // Clean up Claude Code hooks and skills
+  removeGlobalHooksAndSkills();
 
   // Remove config directory
   const overlapDir = getOverlapDir();

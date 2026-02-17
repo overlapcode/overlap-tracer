@@ -44,8 +44,8 @@ export async function pollTeamState(
       };
 
       if (result.data?.sessions) {
-        // Tag each session with the instance URL for linking
         for (const session of result.data.sessions) {
+          session.instance_url = team.instance_url;
           allSessions.push(session);
         }
       }

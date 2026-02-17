@@ -80,7 +80,7 @@ export function enrichLineData(event: IngestEvent, cwd: string | undefined): voi
 /**
  * Walk upward from a line index to find the nearest function/class declaration.
  */
-function findEnclosingFunction(lines: string[], fromIndex: number): string | undefined {
+export function findEnclosingFunction(lines: string[], fromIndex: number): string | undefined {
   for (let i = fromIndex; i >= 0; i--) {
     const line = lines[i];
     for (const pattern of FUNCTION_PATTERNS) {
