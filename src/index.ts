@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -961,9 +961,13 @@ async function cmdUpdate(): Promise<void> {
       console.log(" ✓");
     }
 
-    // Ensure global hooks and skills are up to date
+    // Run post-update setup with the NEW binary (not the old one running now)
     if (hasTeams()) {
-      setupGlobalHooksAndSkills();
+      try {
+        execSync(`"${currentBinary}" _post-update`, { stdio: "inherit", timeout: 10000 });
+      } catch {
+        // Non-fatal — user can run 'overlap join' to set up hooks manually
+      }
     }
 
     console.log(`\n  ✓ Updated to v${latest}\n`);
@@ -990,6 +994,7 @@ switch (command) {
   case "daemon":    await cmdDaemon(); break;
   case "debug":     await cmdDebug(); break;
   case "uninstall": await cmdUninstall(); break;
+  case "_post-update": setupGlobalHooksAndSkills(); break;
   case "version":
   case "--version":
   case "-v":
