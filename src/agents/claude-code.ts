@@ -252,7 +252,10 @@ function extractFileOp(
     sessionState.filesTouched.add(filePath);
   }
 
-  // Capture new_string for Edit/MultiEdit for line-level enrichment
+  // Capture old_string/new_string for Edit/MultiEdit
+  const oldString = (toolName === "Edit" || toolName === "MultiEdit")
+    ? (input.old_string as string) || undefined
+    : undefined;
   const newString = (toolName === "Edit" || toolName === "MultiEdit")
     ? (input.new_string as string) || undefined
     : undefined;
@@ -266,7 +269,8 @@ function extractFileOp(
     file_path: filePath ?? undefined,
     operation,
     bash_command: bashCommand ?? undefined,
-    __new_string: newString,
+    old_string: oldString,
+    new_string: newString,
     repo_name: "",
     user_id: "",
   };

@@ -40,7 +40,7 @@ const FUNCTION_PATTERNS = [
 export function enrichLineData(event: IngestEvent, cwd: string | undefined): void {
   if (!event.file_path || !cwd) return;
 
-  const newString = event.__new_string;
+  const newString = event.new_string;
   const toolName = event.tool_name;
 
   // For Write: whole file was created/replaced

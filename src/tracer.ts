@@ -395,11 +395,9 @@ export class Tracer {
 
       for (const event of events) {
         // Line-level enrichment for file_op events (before stripping paths)
-        if (event.event_type === "file_op" && event.__new_string && event.file_path) {
+        if (event.event_type === "file_op" && event.new_string && event.file_path) {
           enrichLineData(event, tracked!.cwd);
         }
-        // Remove internal enrichment hint before sending
-        delete event.__new_string;
 
         // Determine which repo this event belongs to
         let eventRepoName = tracked!.matched_repo;

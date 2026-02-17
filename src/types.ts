@@ -29,9 +29,8 @@ export type IngestEvent = {
   end_line?: number;
   function_name?: string;
   bash_command?: string;
-
-  // Internal: used for line enrichment, stripped before sending
-  __new_string?: string;
+  old_string?: string;
+  new_string?: string;
 
   // prompt
   prompt_text?: string;
