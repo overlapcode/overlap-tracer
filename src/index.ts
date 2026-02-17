@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -959,6 +959,11 @@ async function cmdUpdate(): Promise<void> {
       await new Promise((r) => setTimeout(r, 1000));
       startDaemonBackground();
       console.log(" ✓");
+    }
+
+    // Ensure global hooks and skills are up to date
+    if (hasTeams()) {
+      setupGlobalHooksAndSkills();
     }
 
     console.log(`\n  ✓ Updated to v${latest}\n`);
