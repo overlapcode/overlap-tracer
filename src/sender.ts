@@ -7,6 +7,7 @@ type PendingBatch = {
   timer: ReturnType<typeof setTimeout> | null;
   retryCount: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  flushing: boolean;
 };
 
 type IngestResponseData = {
@@ -21,6 +22,7 @@ type IngestResponseData = {
 
 const MAX_RETRY_DELAY_MS = 60_000;
 const MAX_RETRIES = 5;
+const MAX_QUEUE_SIZE = 500;
 
 export class EventSender {
   private batches = new Map<string, PendingBatch>();
@@ -70,11 +72,20 @@ export class EventSender {
 
     let batch = this.batches.get(teamUrl);
     if (!batch) {
-      batch = { teamUrl, token, events: [], timer: null, retryCount: 0, retryTimer: null };
+      batch = { teamUrl, token, events: [], timer: null, retryCount: 0, retryTimer: null, flushing: false };
       this.batches.set(teamUrl, batch);
     }
 
+    // Cap queue size — drop oldest events to prevent unbounded accumulation
+    if (batch.events.length >= MAX_QUEUE_SIZE) {
+      batch.events = batch.events.slice(-MAX_QUEUE_SIZE + 1);
+    }
+
     batch.events.push(event);
+
+    // Don't trigger flush if a retry backoff is in progress or a flush is in-flight —
+    // the retry timer or flush completion will drain the queue
+    if (batch.retryTimer || batch.flushing) return;
 
     if (batch.events.length >= this.maxBatchSize) {
       this.flush(teamUrl);
@@ -88,15 +99,17 @@ export class EventSender {
 
   async flush(teamUrl: string): Promise<void> {
     const batch = this.batches.get(teamUrl);
-    if (!batch || batch.events.length === 0) return;
+    if (!batch || batch.events.length === 0 || batch.flushing) return;
 
-    const events = [...batch.events];
-    batch.events = [];
+    // Take at most maxBatchSize events, leave the rest queued
+    const events = batch.events.slice(0, this.maxBatchSize);
+    batch.events = batch.events.slice(this.maxBatchSize);
     if (batch.timer) {
       clearTimeout(batch.timer);
       batch.timer = null;
     }
 
+    batch.flushing = true;
     try {
       const res = await fetch(`${teamUrl}/api/v1/ingest`, {
         method: "POST",
@@ -118,7 +131,7 @@ export class EventSender {
         return;
       }
       if (!res.ok) {
-        const body = await res.json().catch(() => ({} as Record<string, unknown>));
+        const body = (await res.json().catch(() => ({}))) ?? {};
         const errMsg = (body as Record<string, unknown>).error || `HTTP ${res.status}`;
         console.error(`[${teamUrl}] Ingest failed: ${errMsg}`);
         this.requeueWithBackoff(batch, events);
@@ -133,25 +146,33 @@ export class EventSender {
             console.warn(`  → ${e}`);
           }
         }
+        // If more events are queued, schedule a follow-up flush
+        if (batch.events.length > 0) {
+          batch.timer = setTimeout(() => this.flush(teamUrl), 100);
+        }
       }
     } catch (err) {
       console.error(`[${teamUrl}] Ingest error: ${err}`);
       this.requeueWithBackoff(batch, events);
+    } finally {
+      batch.flushing = false;
     }
   }
 
   private requeueWithBackoff(batch: PendingBatch, events: IngestEvent[]): void {
     batch.retryCount++;
 
-    // Drop events after max retries to prevent infinite accumulation
+    // Drop failed events after max retries (keep any new events that arrived)
     if (batch.retryCount > MAX_RETRIES) {
       console.warn(`[${batch.teamUrl}] Dropping ${events.length} events after ${MAX_RETRIES} retries`);
       batch.retryCount = 0;
+      // Don't clear batch.events — new events that arrived during retries are kept
       return;
     }
 
-    // Put events back at the front
-    batch.events = [...events, ...batch.events];
+    // Put failed events back at the front, cap total
+    const combined = [...events, ...batch.events];
+    batch.events = combined.length > MAX_QUEUE_SIZE ? combined.slice(0, MAX_QUEUE_SIZE) : combined;
 
     const delay = Math.min(
       this.batchIntervalMs * Math.pow(2, batch.retryCount),
