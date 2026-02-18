@@ -1,4 +1,5 @@
 import { watch, readFileSync, existsSync, statSync, writeFileSync, unlinkSync } from "fs";
+import { execSync } from "child_process";
 import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { readdirSync } from "fs";
@@ -565,14 +566,24 @@ export function diffRepoLists(
 // ── Daemon PID helpers ───────────────────────────────────────────────────
 
 export function getDaemonPid(): number | null {
+  // Try PID file first (fast path)
   try {
     const pid = parseInt(readFileSync(PID_PATH, "utf-8").trim(), 10);
     // Check if process is alive
     process.kill(pid, 0);
     return pid;
-  } catch {
-    return null;
-  }
+  } catch { /* PID file missing or stale */ }
+
+  // Fallback: find daemon via pgrep (handles missing PID file from race conditions)
+  try {
+    const output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== process.pid);
+    if (pids.length > 0) {
+      return pids[0];
+    }
+  } catch { /* pgrep returns non-zero if no matches */ }
+
+  return null;
 }
 
 export function signalReload(pid: number): void {
