@@ -153,7 +153,14 @@ export class Tracer {
   }
 
   removePidFile(): void {
-    try { unlinkSync(PID_PATH); } catch { /* ignore */ }
+    try {
+      // Only delete if the PID file contains our own PID — another daemon may have
+      // overwritten it during a race (e.g. launchd KeepAlive + manual restart)
+      const filePid = parseInt(readFileSync(PID_PATH, "utf-8").trim(), 10);
+      if (filePid === process.pid) {
+        unlinkSync(PID_PATH);
+      }
+    } catch { /* ignore — file may not exist */ }
   }
 
   private writePidFile(): void {
