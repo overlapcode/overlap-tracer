@@ -8,7 +8,7 @@ const CONFIG_PATH = join(OVERLAP_DIR, "config.json");
 
 const DEFAULT_TRACER_SETTINGS: TracerSettings = {
   batch_interval_ms: 2000,
-  max_batch_size: 25,
+  max_batch_size: 100,
   repo_sync_interval_ms: 300_000,
 };
 
@@ -45,8 +45,8 @@ export function loadConfig(): Config {
 
 export function saveConfig(config: Config): void {
   ensureOverlapDir();
-  // Cap max_batch_size at 100 (server limit)
-  config.tracer.max_batch_size = Math.min(config.tracer.max_batch_size, 100);
+  // Cap max_batch_size at 500 (server limit)
+  config.tracer.max_batch_size = Math.min(config.tracer.max_batch_size, 500);
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 

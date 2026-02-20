@@ -22,7 +22,7 @@ type IngestResponseData = {
 
 const MAX_RETRY_DELAY_MS = 60_000;
 const MAX_RETRIES = 5;
-const MAX_QUEUE_SIZE = 500;
+const MAX_QUEUE_SIZE = 5_000;
 
 export class EventSender {
   private batches = new Map<string, PendingBatch>();
@@ -38,7 +38,7 @@ export class EventSender {
     onBatchSent?: (teamUrl: string, count: number) => void,
   ) {
     this.batchIntervalMs = config.batch_interval_ms;
-    this.maxBatchSize = Math.min(config.max_batch_size, 100);
+    this.maxBatchSize = Math.min(config.max_batch_size, 500);
     this.onBatchSent = onBatchSent;
   }
 
@@ -76,8 +76,10 @@ export class EventSender {
       this.batches.set(teamUrl, batch);
     }
 
-    // Cap queue size — drop oldest events to prevent unbounded accumulation
+    // Safety valve — drop oldest events if queue grows unbounded (should not happen with drain())
     if (batch.events.length >= MAX_QUEUE_SIZE) {
+      const dropCount = batch.events.length - MAX_QUEUE_SIZE + 1;
+      console.warn(`[${teamUrl}] Queue overflow: dropping ${dropCount} oldest events (queue=${batch.events.length})`);
       batch.events = batch.events.slice(-MAX_QUEUE_SIZE + 1);
     }
 
@@ -204,6 +206,46 @@ export class EventSender {
       Promise.allSettled(flushPromises),
       new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
     ]);
+  }
+
+  /**
+   * Wait until all queued events across all teams have been sent.
+   * Used during backfill to apply backpressure — caller waits for drain
+   * before reading more files, preventing queue overflow.
+   */
+  async drain(timeoutMs: number = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (this.getPendingCount() > 0) {
+      if (Date.now() >= deadline) {
+        console.warn(`[sender] Drain timed out with ${this.getPendingCount()} events pending`);
+        return;
+      }
+
+      // Kick off flushes for any team with queued events
+      const flushPromises: Promise<void>[] = [];
+      for (const [url, batch] of this.batches) {
+        if (batch.events.length > 0 && !batch.flushing) {
+          // Clear retry/interval timers so we flush immediately
+          if (batch.retryTimer) {
+            clearTimeout(batch.retryTimer);
+            batch.retryTimer = null;
+          }
+          if (batch.timer) {
+            clearTimeout(batch.timer);
+            batch.timer = null;
+          }
+          flushPromises.push(this.flush(url));
+        }
+      }
+
+      if (flushPromises.length > 0) {
+        await Promise.allSettled(flushPromises);
+      } else {
+        // Flushes are in-flight, wait briefly then re-check
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
   }
 
   clearAll(): void {

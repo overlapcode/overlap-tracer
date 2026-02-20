@@ -36,6 +36,8 @@ export class Tracer {
   private shuttingDown = false;
   // In-memory read positions — only committed to byte_offset after events are flushed
   private readHeads = new Map<string, number>();
+  // Guard against concurrent processFile calls on the same file
+  private processingFiles = new Set<string>();
 
   sender: EventSender;
 
@@ -70,9 +72,9 @@ export class Tracer {
     // Refresh repo lists from all teams
     await this.refreshAllRepoLists();
 
-    // Scan existing files and start watching
+    // Scan existing files (with backpressure) and start watching
     for (const adapter of this.adapters) {
-      this.scanExistingFiles(adapter);
+      await this.scanExistingFiles(adapter);
       this.watchAdapter(adapter);
     }
 
@@ -182,10 +184,16 @@ export class Tracer {
         if (this.teamStatePollTimer) clearInterval(this.teamStatePollTimer);
 
         await this.sender.flushAll(5000);
-        // After final flush, commit all read heads regardless of pending state
-        for (const [filePath, readHead] of this.readHeads) {
-          const tracked = getTrackedFile(this.state, filePath);
-          if (tracked) tracked.byte_offset = readHead;
+        // Only commit read heads if all events were actually sent
+        // If events are still pending (flush timed out), keep byte_offsets behind
+        // so data is re-read on next startup
+        if (this.sender.getPendingCount() === 0) {
+          for (const [filePath, readHead] of this.readHeads) {
+            const tracked = getTrackedFile(this.state, filePath);
+            if (tracked) tracked.byte_offset = readHead;
+          }
+        } else {
+          console.warn(`[tracer] ${this.sender.getPendingCount()} events unsent — byte_offsets NOT advanced (will re-sync on restart)`);
         }
         this.saveState();
         this.removePidFile();
@@ -246,7 +254,7 @@ export class Tracer {
     if (added.length > 0) {
       console.log(`[tracer] Repos added: ${added.join(', ')}. Re-scanning for backfill...`);
       for (const adapter of this.adapters) {
-        this.scanExistingFiles(adapter);
+        await this.scanExistingFiles(adapter);
       }
     }
   }
@@ -264,7 +272,7 @@ export class Tracer {
     }
   }
 
-  private scanExistingFiles(adapter: AgentAdapter): void {
+  private async scanExistingFiles(adapter: AgentAdapter): Promise<void> {
     if (!existsSync(adapter.watchDir)) return;
 
     try {
@@ -278,6 +286,12 @@ export class Tracer {
             if (file.isFile() && file.name.endsWith(adapter.fileExtension)) {
               const filePath = join(folderPath, file.name);
               this.processFile(filePath, adapter);
+
+              // Backpressure: drain queued events before processing next file
+              // Prevents queue overflow during backfill of many files
+              if (this.sender.getPendingCount() > 0) {
+                await this.sender.drain(30_000);
+              }
             }
           }
         } catch {
@@ -302,13 +316,26 @@ export class Tracer {
       const filePath = join(adapter.watchDir, filename);
       if (!existsSync(filePath)) return;
 
-      this.processFile(filePath, adapter);
+      // Fire-and-forget for real-time — small incremental changes won't trigger drain
+      this.processFile(filePath, adapter).catch(() => {});
     });
 
     this.watchers.push(watcher);
   }
 
-  private processFile(filePath: string, adapter: AgentAdapter): void {
+  private async processFile(filePath: string, adapter: AgentAdapter): Promise<void> {
+    // Prevent concurrent processing of the same file
+    if (this.processingFiles.has(filePath)) return;
+    this.processingFiles.add(filePath);
+
+    try {
+      await this.processFileInner(filePath, adapter);
+    } finally {
+      this.processingFiles.delete(filePath);
+    }
+  }
+
+  private async processFileInner(filePath: string, adapter: AgentAdapter): Promise<void> {
     const sessionId = adapter.extractSessionId(filePath);
     let tracked = getTrackedFile(this.state, filePath);
 
@@ -394,6 +421,7 @@ export class Tracer {
 
     // Parse each line and send events
     let bytesProcessed = 0;
+    let eventsQueued = 0;
     for (const line of lines) {
       bytesProcessed += Buffer.byteLength(line, "utf-8") + 1; // +1 for \n
 
@@ -461,6 +489,13 @@ export class Tracer {
             this.sender.add(teamUrl, team.user_token, teamEvent);
           }
         }
+        eventsQueued++;
+      }
+
+      // Mid-file backpressure: drain every 500 events to prevent queue overflow
+      // In real-time mode (small file changes), this never triggers
+      if (eventsQueued > 0 && eventsQueued % 500 === 0 && this.sender.getPendingCount() > 0) {
+        await this.sender.drain(30_000);
       }
     }
 

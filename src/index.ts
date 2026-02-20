@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { loadConfig, saveConfig, addTeam, removeTeam, hasTeams, ensureOverlapDir, getOverlapDir } from "./config";
-import { loadState } from "./state";
+import { loadState, saveState } from "./state";
 import { loadCache, setRepoList, saveCache } from "./cache";
 import { verifyToken, fetchRepos } from "./auth";
 import { Tracer, getDaemonPid, signalReload } from "./tracer";
@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.5.5";
+const VERSION = "1.6.0";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ function printUsage(): void {
     overlap status      Show tracer status, teams, and repos
     overlap update      Update to the latest version
     overlap leave       Leave a team
+    overlap backfill    Re-sync all sessions (optionally for one team)
     overlap start       Start the tracer daemon
     overlap stop        Stop the tracer daemon
     overlap restart     Restart the tracer daemon
@@ -745,6 +746,70 @@ async function cmdLeave(): Promise<void> {
   }
 }
 
+async function cmdBackfill(): Promise<void> {
+  const teamFilter = process.argv[3]; // optional team name
+  const config = loadConfig();
+  const state = loadState();
+
+  if (config.teams.length === 0) {
+    console.log("\n  No teams configured. Run 'overlap join' first.\n");
+    return;
+  }
+
+  // Find matching team(s)
+  let targetTeamUrls: Set<string>;
+  if (teamFilter) {
+    const team = config.teams.find(
+      (t) => t.name.toLowerCase() === teamFilter.toLowerCase() || t.instance_url === teamFilter,
+    );
+    if (!team) {
+      console.log(`\n  Team "${teamFilter}" not found. Available teams:`);
+      for (const t of config.teams) {
+        console.log(`    ${t.name} (${t.instance_url})`);
+      }
+      console.log();
+      return;
+    }
+    targetTeamUrls = new Set([team.instance_url]);
+    console.log(`\n  Resetting byte offsets for team "${team.name}"...`);
+  } else {
+    targetTeamUrls = new Set(config.teams.map((t) => t.instance_url));
+    console.log(`\n  Resetting byte offsets for all ${config.teams.length} team(s)...`);
+  }
+
+  // Reset byte_offsets for matching tracked files
+  let resetCount = 0;
+  for (const [filePath, tracked] of Object.entries(state.tracked_files)) {
+    const matchesTeam = tracked.matched_teams.some((url: string) => targetTeamUrls.has(url));
+    if (matchesTeam && tracked.byte_offset > 0) {
+      tracked.byte_offset = 0;
+      resetCount++;
+    }
+  }
+
+  if (resetCount === 0) {
+    console.log("  No sessions to backfill.\n");
+    return;
+  }
+
+  // Save updated state
+  saveState(state);
+  console.log(`  ✓ Reset ${resetCount} session(s) for re-sync.`);
+
+  // Restart daemon to trigger backfill
+  const pid = getDaemonPid();
+  if (pid) {
+    console.log("  Restarting tracer to begin backfill...");
+    try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    await new Promise((r) => setTimeout(r, 1000));
+    startDaemonBackground();
+    console.log("  ✓ Tracer restarted. Backfill in progress.");
+    console.log("  Server dedup ensures no duplicate events are created.\n");
+  } else {
+    console.log("  Tracer not running. Start it with 'overlap start' to begin backfill.\n");
+  }
+}
+
 async function cmdStart(): Promise<void> {
   if (!hasTeams()) {
     console.log("\n  No teams configured. Run 'overlap join' first.\n");
@@ -985,6 +1050,7 @@ switch (command) {
   case "join":      await cmdJoin(); break;
   case "login":     await cmdLogin(); break;
   case "check":     await cmdCheck(); break;
+  case "backfill":  await cmdBackfill(); break;
   case "status":    await cmdStatus(); break;
   case "update":    await cmdUpdate(); break;
   case "leave":     await cmdLeave(); break;
