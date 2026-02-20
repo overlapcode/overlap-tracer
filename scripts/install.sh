@@ -34,10 +34,7 @@ detect_platform() {
   case "$OS" in
     Darwin) PLATFORM="darwin" ;;
     Linux)  PLATFORM="linux" ;;
-    MINGW*|MSYS*|CYGWIN*)
-      fail "Windows detected. Run this in PowerShell instead:
-    irm https://overlap.dev/install.ps1 | iex"
-      ;;
+    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
     *) fail "Unsupported OS: $OS" ;;
   esac
 
@@ -47,13 +44,21 @@ detect_platform() {
     *) fail "Unsupported architecture: $ARCH" ;;
   esac
 
-  ASSET_NAME="overlap-${PLATFORM}-${ARCH}"
+  if [ "$PLATFORM" = "windows" ]; then
+    BINARY_NAME="overlap.exe"
+    ASSET_NAME="overlap-windows-${ARCH}.exe"
+  else
+    ASSET_NAME="overlap-${PLATFORM}-${ARCH}"
+  fi
 }
 
 # ── Find install directory ───────────────────────────────────────────────
 
 find_install_dir() {
-  if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+  if [ "$PLATFORM" = "windows" ]; then
+    INSTALL_DIR="$HOME/.overlap/bin"
+    mkdir -p "$INSTALL_DIR"
+  elif [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
     INSTALL_DIR="$HOME/.local/bin"
   elif [ -w "/usr/local/bin" ]; then
     INSTALL_DIR="/usr/local/bin"
@@ -103,19 +108,29 @@ main() {
     Check: https://github.com/$REPO/releases/tag/$LATEST"
   fi
 
-  chmod +x "$INSTALL_DIR/$BINARY_NAME"
+  if [ "$PLATFORM" != "windows" ]; then
+    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+  fi
   ok "Installed to $INSTALL_DIR/$BINARY_NAME"
 
   # Check PATH
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo ""
     echo -e "  ${BOLD}Add to your PATH:${RESET}"
-    SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "bash")
-    case "$SHELL_NAME" in
-      zsh)  echo "    echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
-      fish) echo "    fish_add_path $INSTALL_DIR" ;;
-      *)    echo "    echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
-    esac
+    if [ "$PLATFORM" = "windows" ]; then
+      # Convert Git Bash path to Windows path for setx
+      WIN_DIR=$(cygpath -w "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")
+      echo "    setx PATH \"%PATH%;${WIN_DIR}\""
+      echo ""
+      echo -e "  ${DIM}Then restart your terminal.${RESET}"
+    else
+      SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "bash")
+      case "$SHELL_NAME" in
+        zsh)  echo "    echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+        fish) echo "    fish_add_path $INSTALL_DIR" ;;
+        *)    echo "    echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
+      esac
+    fi
   fi
 
   echo ""
