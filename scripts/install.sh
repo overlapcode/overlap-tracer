@@ -35,8 +35,8 @@ detect_platform() {
     Darwin) PLATFORM="darwin" ;;
     Linux)  PLATFORM="linux" ;;
     MINGW*|MSYS*|CYGWIN*)
-      fail "Windows detected. Download the binary manually from GitHub Releases:
-    https://github.com/$REPO/releases/latest"
+      fail "Windows detected. Run this in PowerShell instead:
+    irm https://overlap.dev/install.ps1 | iex"
       ;;
     *) fail "Unsupported OS: $OS" ;;
   esac
