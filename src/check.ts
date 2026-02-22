@@ -4,7 +4,8 @@
  * Two modes:
  *   1. Hook mode (no flags): reads JSON from stdin (Claude Code hook protocol),
  *      outputs hookSpecificOutput JSON to stdout.
- *   2. CLI mode (--json, --repo, --file, --all): called by skills or manually,
+ *   2. CLI mode (--json, --repo, --file, --all, --old-string, --strict, --context):
+ *      called by skills or manually,
  *      outputs structured JSON to stdout.
  *
  * Exits silently (exit 0) when:
@@ -22,7 +23,7 @@ import { homedir } from "os";
 import { readTeamState, TEAM_STATE_PATH } from "./team-state";
 import { loadConfig } from "./config";
 import { findEnclosingFunction } from "./enrichment";
-import type { TeamState, TeamStateSession } from "./types";
+import type { TeamConfig, TeamState, TeamStateSession } from "./types";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,9 @@ type CheckFlags = {
   repo: string | null;
   file: string | null;
   all: boolean;
+  oldString: string | null;
+  strict: boolean;
+  context: boolean;
 };
 
 type GitInfo = {
@@ -68,29 +72,32 @@ type OverlapMatch = {
   session_url: string;
 };
 
+type OverlapDecision = "proceed" | "warn" | "block";
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 export async function cmdCheck(): Promise<void> {
   // Parse CLI args
   const args = process.argv.slice(3); // after "overlap check"
   const flags = parseCheckArgs(args);
+  const isHookMode = args.length === 0;
 
   // Early bail: no config = no teams = nothing to check
   const configPath = join(homedir(), ".overlap", "config.json");
   if (!existsSync(configPath)) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
     process.exit(0);
   }
   const config = loadConfig();
   if (config.teams.length === 0) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
   // Determine mode: stdin (hook) or CLI args (skill)
   let input: HookInput | null = null;
 
-  if (!flags.file && !flags.repo && !flags.all) {
+  if (isHookMode) {
     // Hook mode: read from stdin
     try {
       const raw = readFileSync(0, "utf-8"); // fd 0 = stdin
@@ -108,45 +115,19 @@ export async function cmdCheck(): Promise<void> {
 
   // Not in a git repo and no --repo flag — global hook in non-git dir
   if (!repoName && !flags.all) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
-  // Read team state cache
-  const state = readTeamState();
-  if (!state) {
-    if (!existsSync(TEAM_STATE_PATH)) {
-      // File doesn't exist — daemon likely not running
-      if (flags.json) {
-        outputJson({
-          overlaps: [],
-          team_sessions: [],
-          warning: "team-state.json not found. Is the overlap daemon running?",
-        });
-      }
-      // Hook mode: silent, don't block the user
-    } else {
-      // File exists but is stale (>2 min old)
-      if (flags.json) {
-        outputJson({
-          overlaps: [],
-          team_sessions: [],
-          warning: "Team state is stale (>2 min). The daemon may have stopped.",
-        });
-      }
-    }
-    process.exit(0);
-  }
-  if (state.sessions.length === 0) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
-    process.exit(0);
-  }
-
-  // Exclude own sessions
   const currentUserIds = new Set(config.teams.map((t) => t.user_id));
 
   // --all mode: return all teammate sessions (for overlap-context skill)
   if (flags.all) {
+    const state = readTeamState();
+    if (!state || state.sessions.length === 0) {
+      if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
+      process.exit(0);
+    }
     outputAllSessions(state, currentUserIds, flags.json);
     process.exit(0);
   }
@@ -159,7 +140,7 @@ export async function cmdCheck(): Promise<void> {
     null;
 
   if (!filePath) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
@@ -170,7 +151,7 @@ export async function cmdCheck(): Promise<void> {
 
   // File is outside the repo — nothing to check
   if (relPath.startsWith("..")) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
     process.exit(0);
   }
 
@@ -178,17 +159,18 @@ export async function cmdCheck(): Promise<void> {
   let targetStartLine: number | null = null;
   let targetEndLine: number | null = null;
   let targetFunctionName: string | null = null;
+  const oldString = flags.oldString || input?.tool_input?.old_string || null;
 
-  if (input?.tool_input?.old_string && filePath) {
+  if (oldString && filePath) {
     try {
       const content = readFileSync(absFilePath, "utf-8");
-      const idx = content.indexOf(input.tool_input.old_string);
+      const idx = content.indexOf(oldString);
       if (idx !== -1) {
         const before = content.substring(0, idx);
         targetStartLine = before.split("\n").length;
         targetEndLine =
           targetStartLine +
-          input.tool_input.old_string.split("\n").length -
+          oldString.split("\n").length -
           1;
 
         // Resolve enclosing function for the target edit
@@ -201,19 +183,69 @@ export async function cmdCheck(): Promise<void> {
     }
   }
 
-  // Find overlaps
+  // ── Server query (real-time, 2s timeout) ────────────────────────────
+  const sessionId = input?.session_id || "cli";
+  const serverResult = await tryServerOverlapQuery(
+    config.teams,
+    repoName!,
+    relPath,
+    sessionId,
+    targetStartLine,
+    targetEndLine,
+    targetFunctionName,
+  );
+
+  if (serverResult) {
+    outputMatchResult(
+      serverResult.decision,
+      serverResult.overlaps,
+      relPath,
+      gitInfo,
+      isHookMode,
+      flags,
+    );
+    return;
+  }
+
+  // ── Fallback: local team-state cache ────────────────────────────────
+  const state = readTeamState();
+  if (!state) {
+    if (!existsSync(TEAM_STATE_PATH)) {
+      if (flags.json) {
+        outputJson({
+          decision: "proceed",
+          overlaps: [],
+          team_sessions: [],
+          warning: "Server unreachable and team-state.json not found. Is the overlap daemon running?",
+        });
+      }
+    } else {
+      if (flags.json) {
+        outputJson({
+          decision: "proceed",
+          overlaps: [],
+          team_sessions: [],
+          warning: "Server unreachable and team state is stale (>2 min). The daemon may have stopped.",
+        });
+      }
+    }
+    process.exit(0);
+  }
+  if (state.sessions.length === 0) {
+    if (flags.json) outputJson({ decision: "proceed", overlaps: [], team_sessions: [] });
+    process.exit(0);
+  }
+
+  // Find overlaps from cache
   const matches: OverlapMatch[] = [];
 
   for (const session of state.sessions) {
-    // Skip self
     if (currentUserIds.has(session.user_id)) continue;
-    // Skip other repos
     if (session.repo_name !== repoName) continue;
 
     for (const region of session.regions) {
       if (region.file_path !== relPath) continue;
 
-      // Determine overlap tier
       let tier: OverlapMatch["tier"] = "file";
 
       if (
@@ -222,14 +254,12 @@ export async function cmdCheck(): Promise<void> {
         region.start_line != null &&
         region.end_line != null
       ) {
-        // Check line overlap
         if (
           targetStartLine <= region.end_line &&
           targetEndLine >= region.start_line
         ) {
           tier = "line";
         } else {
-          // Check adjacency (within 30 lines)
           const gap = Math.min(
             Math.abs(targetStartLine - region.end_line),
             Math.abs(targetEndLine - region.start_line),
@@ -240,7 +270,6 @@ export async function cmdCheck(): Promise<void> {
         }
       }
 
-      // Function tier: both sides have function names and they match
       if (tier === "file" && region.function_name && targetFunctionName) {
         if (region.function_name === targetFunctionName) {
           tier = "function";
@@ -269,33 +298,202 @@ export async function cmdCheck(): Promise<void> {
   }
 
   if (matches.length === 0) {
-    if (flags.json) outputJson({ overlaps: [], team_sessions: [] });
+    if (flags.json) {
+      outputJson({
+        decision: "proceed",
+        overlaps: [],
+        team_sessions: flags.context
+          ? buildTeamSessions(state, currentUserIds, repoName)
+          : [],
+        git_host: gitInfo?.gitHost || null,
+      });
+    }
     process.exit(0);
   }
 
-  // Sort: line > function > adjacent > file
   const tierOrder = { line: 0, function: 1, adjacent: 2, file: 3 };
   matches.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier]);
+  const hasHardOverlap = matches.some(
+    (m) => m.tier === "line" || m.tier === "function",
+  );
+  const decision: OverlapDecision = hasHardOverlap ? "block" : "warn";
 
-  // Output
-  if (flags.json) {
-    outputJson({
-      overlaps: matches,
-      git_host: gitInfo?.gitHost || null,
-    });
+  outputMatchResult(decision, matches, relPath, gitInfo, isHookMode, flags, state, currentUserIds, repoName);
+}
+
+// ── Server Query ────────────────────────────────────────────────────────
+
+type ServerOverlap = {
+  display_name: string;
+  session_id: string;
+  repo_name: string;
+  started_at: string;
+  summary: string | null;
+  file_path: string;
+  start_line: number | null;
+  end_line: number | null;
+  function_name: string | null;
+  tier: OverlapMatch["tier"];
+  last_touched_at: string;
+};
+
+/**
+ * Query all configured team instances for real-time overlap data.
+ * Returns null if ALL instances are unreachable (triggers cache fallback).
+ */
+async function tryServerOverlapQuery(
+  teams: TeamConfig[],
+  repoName: string,
+  filePath: string,
+  sessionId: string,
+  startLine: number | null,
+  endLine: number | null,
+  functionName: string | null,
+): Promise<{ decision: OverlapDecision; overlaps: OverlapMatch[] } | null> {
+  const allOverlaps: OverlapMatch[] = [];
+  let anySuccess = false;
+
+  for (const team of teams) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+
+      const response = await fetch(`${team.instance_url}/api/v1/overlap-query`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${team.user_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repo_name: repoName,
+          file_path: filePath,
+          session_id: sessionId,
+          start_line: startLine,
+          end_line: endLine,
+          function_name: functionName,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) continue;
+
+      const result = (await response.json()) as {
+        data: { decision: OverlapDecision; overlaps: ServerOverlap[] };
+      };
+      anySuccess = true;
+
+      for (const o of result.data.overlaps) {
+        allOverlaps.push({
+          display_name: o.display_name,
+          session_id: o.session_id,
+          repo_name: o.repo_name,
+          started_at: o.started_at,
+          summary: o.summary,
+          file_path: o.file_path,
+          start_line: o.start_line,
+          end_line: o.end_line,
+          function_name: o.function_name,
+          tier: o.tier,
+          session_url: `${team.instance_url}/session/${o.session_id}`,
+        });
+      }
+    } catch {
+      // Timeout or network error — this team's instance is unreachable
+    }
+  }
+
+  if (!anySuccess) return null;
+
+  // Re-sort merged results across teams
+  const tierOrder = { line: 0, function: 1, adjacent: 2, file: 3 };
+  allOverlaps.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier]);
+
+  const hasHardOverlap = allOverlaps.some(
+    (m) => m.tier === "line" || m.tier === "function",
+  );
+  const decision: OverlapDecision =
+    allOverlaps.length === 0 ? "proceed" : hasHardOverlap ? "block" : "warn";
+
+  return { decision, overlaps: allOverlaps };
+}
+
+// ── Output ──────────────────────────────────────────────────────────────
+
+/**
+ * Unified output for overlap results (used by both server and cache paths).
+ */
+function outputMatchResult(
+  decision: OverlapDecision,
+  matches: OverlapMatch[],
+  relPath: string,
+  gitInfo: GitInfo | null,
+  isHookMode: boolean,
+  flags: CheckFlags,
+  state?: TeamState | null,
+  currentUserIds?: Set<string>,
+  repoName?: string | null,
+): void {
+  if (matches.length === 0) {
+    if (flags.json) {
+      outputJson({
+        decision: "proceed",
+        overlaps: [],
+        team_sessions: [],
+        git_host: gitInfo?.gitHost || null,
+      });
+    }
     process.exit(0);
   }
 
-  // Hook mode: hookSpecificOutput for Claude Code
-  outputHookFormat(matches, relPath, gitInfo);
+  if (flags.json) {
+    const payload: Record<string, unknown> = {
+      decision,
+      overlaps: matches,
+      git_host: gitInfo?.gitHost || null,
+    };
+    if (flags.context && state && currentUserIds && repoName) {
+      payload.team_sessions = buildTeamSessions(state, currentUserIds, repoName);
+    }
+    outputJson(payload);
+    if (flags.strict && decision === "block" && !isHookMode) {
+      process.exit(2);
+    }
+    process.exit(0);
+  }
+
+  if (isHookMode) {
+    outputHookFormat(matches, relPath, gitInfo);
+    // outputHookFormat calls process.exit(0)
+  }
+
+  outputCliText(matches, relPath, gitInfo, decision);
+  if (flags.strict && decision === "block") {
+    process.exit(2);
+  }
+  process.exit(0);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function parseCheckArgs(args: string[]): CheckFlags {
-  const flags: CheckFlags = { json: false, repo: null, file: null, all: false };
+  const flags: CheckFlags = {
+    json: false,
+    repo: null,
+    file: null,
+    all: false,
+    oldString: null,
+    strict: false,
+    context: false,
+  };
   for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
+    const arg = args[i];
+    if (arg.startsWith("--old-string=")) {
+      flags.oldString = arg.slice("--old-string=".length) || null;
+      continue;
+    }
+    switch (arg) {
       case "--json":
         flags.json = true;
         break;
@@ -307,6 +505,15 @@ function parseCheckArgs(args: string[]): CheckFlags {
         break;
       case "--all":
         flags.all = true;
+        break;
+      case "--old-string":
+        flags.oldString = args[++i] || null;
+        break;
+      case "--strict":
+        flags.strict = true;
+        break;
+      case "--context":
+        flags.context = true;
         break;
     }
   }
@@ -373,22 +580,13 @@ function outputAllSessions(
   currentUserIds: Set<string>,
   jsonMode: boolean,
 ): void {
-  const sessions = state.sessions.filter(
-    (s) => !currentUserIds.has(s.user_id),
-  );
+  const sessions = buildTeamSessions(state, currentUserIds, null);
 
   if (jsonMode) {
     outputJson({
+      decision: "proceed",
       overlaps: [],
-      team_sessions: sessions.map((s) => ({
-        display_name: s.display_name,
-        session_id: s.session_id,
-        repo_name: s.repo_name,
-        started_at: s.started_at,
-        summary: s.summary,
-        session_url: `${s.instance_url || state.instance_url}/session/${s.session_id}`,
-        regions: s.regions,
-      })),
+      team_sessions: sessions,
     });
   } else {
     // Human-readable fallback
@@ -471,6 +669,81 @@ function outputHookFormat(
 
   process.stdout.write(JSON.stringify(output));
   process.exit(0);
+}
+
+function outputCliText(
+  matches: OverlapMatch[],
+  relPath: string,
+  gitInfo: GitInfo | null,
+  decision: OverlapDecision,
+): void {
+  for (const m of matches) {
+    const ago = formatAgo(m.started_at);
+    const regionDesc = m.function_name
+      ? `${m.function_name}() (lines ${m.start_line}-${m.end_line})`
+      : m.start_line
+        ? `lines ${m.start_line}-${m.end_line}`
+        : "this file";
+
+    console.log(`OVERLAP WARNING: ${m.file_path}`);
+    console.log(`${m.display_name} is actively editing ${regionDesc} (${ago}).`);
+    if (m.session_url) console.log(`Session: ${m.session_url}`);
+    if (m.summary) console.log(`Session summary: "${m.summary}"`);
+    console.log("");
+  }
+
+  if (decision === "block") {
+    console.log(
+      "Decision: block (hard overlap). Review teammate session and coordinate before editing.",
+    );
+  } else {
+    console.log("Decision: warn (same file/adjacent activity). Proceed with awareness.");
+  }
+
+  if (gitInfo?.gitHost === "github") {
+    console.log("");
+    console.log("Also check for existing PRs that may cover this work:");
+    console.log(`  gh pr list --search "${relPath}" --state open --limit 5`);
+  } else if (gitInfo?.gitHost === "gitlab") {
+    console.log("");
+    console.log("Also check for existing MRs that may cover this work:");
+    console.log(`  glab mr list --search "${relPath}" --state opened`);
+  }
+}
+
+function buildTeamSessions(
+  state: TeamState,
+  currentUserIds: Set<string>,
+  repoName: string | null,
+): Array<{
+  display_name: string;
+  session_id: string;
+  repo_name: string;
+  started_at: string;
+  summary: string | null;
+  session_url: string;
+  regions: TeamStateSession["regions"];
+}> {
+  const sessions = state.sessions.filter((s) => !currentUserIds.has(s.user_id));
+  const sameRepo = repoName
+    ? sessions.filter((s) => s.repo_name === repoName)
+    : sessions;
+  const scoped = sameRepo.length > 0 ? sameRepo : sessions;
+
+  return scoped
+    .slice()
+    .sort(
+      (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime(),
+    )
+    .map((s) => ({
+      display_name: s.display_name,
+      session_id: s.session_id,
+      repo_name: s.repo_name,
+      started_at: s.started_at,
+      summary: s.summary,
+      session_url: `${s.instance_url || state.instance_url}/session/${s.session_id}`,
+      regions: s.regions,
+    }));
 }
 
 function formatAgo(iso: string): string {
