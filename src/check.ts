@@ -70,6 +70,13 @@ type OverlapMatch = {
   function_name: string | null;
   tier: "line" | "function" | "adjacent" | "file";
   session_url: string;
+  git_branch: string | null;
+  is_pushed: boolean;
+  latest_edit: {
+    old_string: string | null;
+    new_string: string | null;
+    timestamp: string;
+  } | null;
 };
 
 type OverlapDecision = "proceed" | "warn" | "block";
@@ -203,6 +210,10 @@ export async function cmdCheck(): Promise<void> {
       gitInfo,
       isHookMode,
       flags,
+      null,
+      undefined,
+      null,
+      serverResult.guidance,
     );
     return;
   }
@@ -293,6 +304,9 @@ export async function cmdCheck(): Promise<void> {
         session_url: sessionUrl
           ? `${sessionUrl}/session/${session.session_id}`
           : "",
+        git_branch: null,
+        is_pushed: false,
+        latest_edit: null,
       });
     }
   }
@@ -335,6 +349,13 @@ type ServerOverlap = {
   function_name: string | null;
   tier: OverlapMatch["tier"];
   last_touched_at: string;
+  git_branch: string | null;
+  is_pushed: boolean;
+  latest_edit: {
+    old_string: string | null;
+    new_string: string | null;
+    timestamp: string;
+  } | null;
 };
 
 /**
@@ -349,9 +370,10 @@ async function tryServerOverlapQuery(
   startLine: number | null,
   endLine: number | null,
   functionName: string | null,
-): Promise<{ decision: OverlapDecision; overlaps: OverlapMatch[] } | null> {
+): Promise<{ decision: OverlapDecision; overlaps: OverlapMatch[]; guidance: string | null } | null> {
   const allOverlaps: OverlapMatch[] = [];
   let anySuccess = false;
+  let serverGuidance: string | null = null;
 
   for (const team of teams) {
     try {
@@ -380,9 +402,10 @@ async function tryServerOverlapQuery(
       if (!response.ok) continue;
 
       const result = (await response.json()) as {
-        data: { decision: OverlapDecision; overlaps: ServerOverlap[] };
+        data: { decision: OverlapDecision; overlaps: ServerOverlap[]; guidance: string | null };
       };
       anySuccess = true;
+      if (result.data.guidance) serverGuidance = result.data.guidance;
 
       for (const o of result.data.overlaps) {
         allOverlaps.push({
@@ -397,6 +420,9 @@ async function tryServerOverlapQuery(
           function_name: o.function_name,
           tier: o.tier,
           session_url: `${team.instance_url}/session/${o.session_id}`,
+          git_branch: o.git_branch,
+          is_pushed: o.is_pushed,
+          latest_edit: o.latest_edit,
         });
       }
     } catch {
@@ -416,7 +442,7 @@ async function tryServerOverlapQuery(
   const decision: OverlapDecision =
     allOverlaps.length === 0 ? "proceed" : hasHardOverlap ? "block" : "warn";
 
-  return { decision, overlaps: allOverlaps };
+  return { decision, overlaps: allOverlaps, guidance: serverGuidance };
 }
 
 // ── Output ──────────────────────────────────────────────────────────────
@@ -434,6 +460,7 @@ function outputMatchResult(
   state?: TeamState | null,
   currentUserIds?: Set<string>,
   repoName?: string | null,
+  guidance?: string | null,
 ): void {
   if (matches.length === 0) {
     if (flags.json) {
@@ -464,7 +491,7 @@ function outputMatchResult(
   }
 
   if (isHookMode) {
-    outputHookFormat(matches, relPath, gitInfo);
+    outputHookFormat(matches, relPath, gitInfo, decision, guidance);
     // outputHookFormat calls process.exit(0)
   }
 
@@ -611,35 +638,53 @@ function outputHookFormat(
   matches: OverlapMatch[],
   relPath: string,
   gitInfo: GitInfo | null,
+  decision: OverlapDecision,
+  guidance?: string | null,
 ): void {
   const lines: string[] = [];
+  const isBlock = decision === "block";
 
   for (const m of matches) {
     const ago = formatAgo(m.started_at);
-    const regionDesc = m.function_name
+    const region = m.function_name
       ? `${m.function_name}() (lines ${m.start_line}-${m.end_line})`
       : m.start_line
         ? `lines ${m.start_line}-${m.end_line}`
         : "this file";
 
-    lines.push(`OVERLAP WARNING: ${m.file_path}`);
+    const pushState = m.is_pushed ? "pushed" : "unpushed";
+    const branch = m.git_branch ? ` on branch '${m.git_branch}'` : "";
+
+    lines.push(`OVERLAP ${isBlock ? "BLOCKED" : "WARNING"}: ${m.file_path}`);
     lines.push("");
-    lines.push(`${m.display_name} is actively editing ${regionDesc}.`);
-    lines.push(`Session started ${ago}.`);
+    lines.push(`${m.display_name} is actively editing ${region} (${pushState}${branch}).`);
+    lines.push(`Overlap tier: ${m.tier}. Session started ${ago}.`);
     if (m.session_url) {
       lines.push(`Session: ${m.session_url}`);
     }
     if (m.summary) {
       lines.push(`Session summary: "${m.summary}"`);
     }
+
+    // Include latest diff if available
+    if (m.latest_edit) {
+      lines.push("");
+      lines.push("Latest edit on this file:");
+      if (m.latest_edit.old_string) {
+        lines.push(`  Removed: "${m.latest_edit.old_string}"`);
+      }
+      if (m.latest_edit.new_string) {
+        lines.push(`  Added:   "${m.latest_edit.new_string}"`);
+      }
+    }
+
     lines.push("");
   }
 
-  // Recommendation
-  const hasHardOverlap = matches.some(
-    (m) => m.tier === "line" || m.tier === "function",
-  );
-  if (hasHardOverlap) {
+  // Server guidance or fallback recommendation
+  if (guidance) {
+    lines.push(guidance);
+  } else if (isBlock) {
     lines.push(
       "Recommendation: Review the other session before modifying this region. If the work conflicts, coordinate with the other developer.",
     );
@@ -660,14 +705,47 @@ function outputHookFormat(
     lines.push(`  glab mr list --search "${relPath}" --state opened`);
   }
 
-  const output = {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      additionalContext: lines.join("\n"),
-    },
-  };
+  const contextText = lines.join("\n");
 
-  process.stdout.write(JSON.stringify(output));
+  if (isBlock) {
+    // Hard overlap: DENY the tool so Claude can decide what to do
+    const hardMatches = matches.filter(
+      (m) => m.tier === "line" || m.tier === "function",
+    );
+    const reasons: string[] = [];
+    for (const m of hardMatches) {
+      const region = m.function_name
+        ? `${m.function_name}() (lines ${m.start_line}-${m.end_line})`
+        : m.start_line
+          ? `lines ${m.start_line}-${m.end_line}`
+          : m.file_path;
+      const pushInfo = m.is_pushed ? "pushed" : "unpushed";
+      const branch = m.git_branch ? ` branch '${m.git_branch}'` : "";
+      reasons.push(
+        `${m.display_name} is editing ${region} (${m.tier} overlap, ${pushInfo}${branch})`,
+      );
+    }
+
+    const output = {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `OVERLAP BLOCKED: ${reasons.join("; ")}. Review their changes and coordinate before editing this region.`,
+        additionalContext: contextText,
+      },
+    };
+    process.stdout.write(JSON.stringify(output));
+  } else {
+    // Soft overlap: proceed with context
+    const output = {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        additionalContext: contextText,
+      },
+    };
+    process.stdout.write(JSON.stringify(output));
+  }
+
   process.exit(0);
 }
 
