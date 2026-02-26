@@ -1,6 +1,7 @@
 import { join, basename } from "path";
 import { homedir, hostname } from "os";
 import { execSync } from "child_process";
+import { readFileSync } from "fs";
 import type { AgentAdapter } from "./types";
 import type { IngestEvent, SessionParserState } from "../types";
 
@@ -260,6 +261,19 @@ function extractFileOp(
     ? (input.new_string as string) || undefined
     : undefined;
 
+  // Compute line numbers from the file. By the time the tracer processes
+  // the JSONL line, the edit has already been applied, so the file contains
+  // new_string (not old_string). Search for new_string first, fall back to old_string.
+  let startLine: number | undefined;
+  let endLine: number | undefined;
+  if (filePath && filePath !== "(bash)" && (newString || oldString)) {
+    const lines = findLineRange(filePath, newString ?? oldString!);
+    if (lines) {
+      startLine = lines.start;
+      endLine = lines.end;
+    }
+  }
+
   return {
     event_type: "file_op",
     agent_type: AGENT_TYPE,
@@ -268,12 +282,31 @@ function extractFileOp(
     tool_name: toolName,
     file_path: filePath ?? undefined,
     operation,
+    start_line: startLine,
+    end_line: endLine,
     bash_command: bashCommand ?? undefined,
     old_string: oldString,
     new_string: newString,
     repo_name: "",
     user_id: "",
   };
+}
+
+/**
+ * Find the line range of `needle` in a file. Returns 1-indexed start/end lines,
+ * or null if the file can't be read or the string isn't found.
+ */
+function findLineRange(filePath: string, needle: string): { start: number; end: number } | null {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const idx = content.indexOf(needle);
+    if (idx === -1) return null;
+    const startLine = content.slice(0, idx).split("\n").length;
+    const needleLines = needle.split("\n").length;
+    return { start: startLine, end: startLine + needleLines - 1 };
+  } catch {
+    return null;
+  }
 }
 
 function getGitBranch(cwd: string | undefined): string | undefined {
