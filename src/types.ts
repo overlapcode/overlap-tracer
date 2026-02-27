@@ -122,6 +122,8 @@ export type SessionParserState = {
   _gitBranch?: string;
   _cwd?: string;
   _branchUpdateEmitted?: boolean;
+  _model?: string;
+  _modelUpdateEmitted?: boolean;
 };
 
 // ── Team State (polled from instance, cached locally) ────────────────────
