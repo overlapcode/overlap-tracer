@@ -1,7 +1,7 @@
 {
   "name": "overlapdev",
   "version": "1.7.3",
-  "description": "Overlap - See what your team is building with coding agents",
+  "description": "Overlap - Stop your coding agents from writing conflicting code",
   "type": "module",
   "bin": {
     "overlap": "./bin/run.js"

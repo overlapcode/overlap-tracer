@@ -6,7 +6,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/overlapcode/overlap-tracer)](https://github.com/overlapcode/overlap-tracer/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A lightweight background daemon that watches coding agent sessions (Claude Code, with more agents coming) and forwards activity signals to your team's [Overlap](https://overlap.dev) instance.
+The local agent for [Overlap](https://overlap.dev) — stop your coding agents from writing conflicting code. This lightweight daemon watches coding agent sessions (Claude Code, with more agents coming), detects overlapping work in real time, and blocks conflicts before they ship.
 
 ## What It Does
 

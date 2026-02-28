@@ -60,7 +60,7 @@ async function prompt(question: string): Promise<string> {
 
 function printUsage(): void {
   console.log(`
-  overlap v${VERSION} — See what your team is building with coding agents
+  overlap v${VERSION} — Stop your coding agents from writing conflicting code
 
   Usage:
     overlap join [url]  Join a team (or update token for existing team)
