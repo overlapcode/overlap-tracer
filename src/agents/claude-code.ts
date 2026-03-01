@@ -313,8 +313,8 @@ function findLineRange(filePath: string, needle: string): { start: number; end: 
     const content = readFileSync(filePath, "utf-8");
     const idx = content.indexOf(needle);
     if (idx === -1) return null;
-    const startLine = content.slice(0, idx).split("\n").length;
-    const needleLines = needle.split("\n").length;
+    const startLine = content.slice(0, idx).split(/\r?\n/).length;
+    const needleLines = needle.split(/\r?\n/).length;
     return { start: startLine, end: startLine + needleLines - 1 };
   } catch {
     return null;

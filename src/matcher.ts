@@ -1,4 +1,4 @@
-import { basename, join } from "path";
+import { basename, join, sep, isAbsolute, normalize } from "path";
 import { execSync } from "child_process";
 import { readdirSync, statSync } from "fs";
 import type { GitRemoteEntry } from "./types";
@@ -136,14 +136,16 @@ export function matchFileToRepo(
   cwd: string,
   subDirRepos: Map<string, string>,
 ): string | null {
-  if (!filePath.startsWith("/")) return null;
+  if (!isAbsolute(filePath)) return null;
 
-  const cwdPrefix = cwd.endsWith("/") ? cwd : cwd + "/";
-  if (!filePath.startsWith(cwdPrefix)) return null;
+  const normFile = normalize(filePath);
+  const normCwd = normalize(cwd);
+  const cwdPrefix = normCwd.endsWith(sep) ? normCwd : normCwd + sep;
+  if (!normFile.startsWith(cwdPrefix)) return null;
 
-  const relative = filePath.slice(cwdPrefix.length);
-  const firstSlash = relative.indexOf("/");
-  const topDir = firstSlash > 0 ? relative.slice(0, firstSlash) : relative;
+  const relative = normFile.slice(cwdPrefix.length);
+  const firstSep = relative.search(/[/\\]/);
+  const topDir = firstSep > 0 ? relative.slice(0, firstSep) : relative;
 
   return subDirRepos.get(topDir) ?? null;
 }
@@ -174,7 +176,13 @@ function resolveGitRemote(cwd: string): GitRemoteEntry | null {
  * Sentinel values like "(bash)", "(grep)", "(glob)" are passed through unchanged.
  */
 export function stripFilePath(filePath: string, cwd: string | undefined): string {
-  if (!cwd || !filePath.startsWith("/")) return filePath;
-  const prefix = cwd.endsWith("/") ? cwd : cwd + "/";
-  return filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath;
+  if (!cwd || !isAbsolute(filePath)) return filePath;
+  const normFile = normalize(filePath);
+  const normCwd = normalize(cwd);
+  const prefix = normCwd.endsWith(sep) ? normCwd : normCwd + sep;
+  if (normFile.startsWith(prefix)) {
+    // Always use forward slashes in the relative output (for API consistency)
+    return normFile.slice(prefix.length).replaceAll("\\", "/");
+  }
+  return filePath;
 }

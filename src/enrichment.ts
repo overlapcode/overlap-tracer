@@ -56,7 +56,7 @@ export function enrichLineData(event: IngestEvent, cwd: string | undefined): voi
   try {
     const absPath = resolve(cwd, event.file_path);
     const content = readFileSync(absPath, "utf-8");
-    const lines = content.split("\n");
+    const lines = content.split(/\r?\n/);
 
     // Find where new_string starts in the file
     const idx = content.indexOf(newString);

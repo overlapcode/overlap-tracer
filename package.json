@@ -1,6 +1,6 @@
 {
   "name": "overlapdev",
-  "version": "1.7.3",
+  "version": "1.7.4",
   "description": "Overlap - Stop your coding agents from writing conflicting code",
   "type": "module",
   "bin": {

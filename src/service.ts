@@ -119,21 +119,43 @@ function uninstallLinuxService(): void {
   } catch { /* not found */ }
 }
 
-// ── Windows: Task Scheduler ────────────────────────────────────────────
+// ── Windows: Registry Run key (user-level, no admin needed) ───────────
+
+const WIN_REG_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const WIN_REG_VALUE = "OverlapTracer";
 
 function installWindowsService(): void {
   const binaryPath = getBinaryPath();
+
+  // Use Registry Run key — works without admin privileges
+  try {
+    execSync(
+      `reg add "${WIN_REG_KEY}" /v "${WIN_REG_VALUE}" /t REG_SZ /d "\\"${binaryPath}\\" daemon" /f`,
+      { stdio: "pipe" },
+    );
+    return;
+  } catch (err) {
+    console.error("[service] Registry setup warning:", err);
+  }
+
+  // Fallback: try Task Scheduler (requires admin)
   try {
     execSync(
       `schtasks /Create /TN "OverlapTracer" /TR "\\"${binaryPath}\\" daemon" /SC ONLOGON /RL LIMITED /F`,
       { stdio: "pipe" },
     );
-  } catch (err) {
-    console.error("[service] Task Scheduler setup warning:", err);
+  } catch {
+    // Both methods failed — user may need to start manually
   }
 }
 
 function uninstallWindowsService(): void {
+  // Remove Registry entry
+  try {
+    execSync(`reg delete "${WIN_REG_KEY}" /v "${WIN_REG_VALUE}" /f`, { stdio: "pipe" });
+  } catch { /* not found */ }
+
+  // Also clean up legacy Task Scheduler entry if present
   try {
     execSync('schtasks /Delete /TN "OverlapTracer" /F', { stdio: "pipe" });
   } catch { /* not found */ }
@@ -164,6 +186,12 @@ export function isServiceInstalled(): boolean {
     case "darwin": return existsSync(getMacPlistPath());
     case "linux": return existsSync(getLinuxServicePath());
     case "win32": {
+      // Check Registry Run key first (new method)
+      try {
+        const output = execSync(`reg query "${WIN_REG_KEY}" /v "${WIN_REG_VALUE}"`, { stdio: "pipe" }).toString();
+        if (output.includes(WIN_REG_VALUE)) return true;
+      } catch { /* not found */ }
+      // Check legacy Task Scheduler entry
       try {
         execSync('schtasks /Query /TN "OverlapTracer"', { stdio: "pipe" });
         return true;

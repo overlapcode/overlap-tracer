@@ -11,20 +11,48 @@ import { homedir } from "os";
 import { spawn, execSync } from "child_process";
 import { cmdCheck } from "./check";
 
-const VERSION = "1.7.3";
+const VERSION = "1.7.4";
 const REPO = "overlapcode/overlap-tracer";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+function getInstanceHash(): string {
+  try {
+    const config = loadConfig();
+    const teamUrl = config.teams?.[0]?.instance_url ?? "unknown";
+    return new Bun.CryptoHasher("sha256").update(teamUrl).digest("hex").slice(0, 16);
+  } catch {
+    return "unknown";
+  }
+}
+
+function getMemberHash(): string {
+  try {
+    const config = loadConfig();
+    const token = config.teams?.[0]?.user_token ?? "unknown";
+    return new Bun.CryptoHasher("sha256").update(token).digest("hex").slice(0, 16);
+  } catch {
+    return "unknown";
+  }
+}
+
 async function checkForUpdate(): Promise<string | null> {
   try {
-    const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+    const resp = await fetch("https://overlap.dev/api/v1/ping", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: VERSION,
+        os: process.platform,
+        arch: process.arch,
+        instance_hash: getInstanceHash(),
+        member_hash: getMemberHash(),
+      }),
       signal: AbortSignal.timeout(3000),
     });
     if (!resp.ok) return null;
-    const data = await resp.json() as { tag_name?: string };
-    const latest = data.tag_name?.replace(/^v/, "");
-    if (latest && latest !== VERSION) return latest;
+    const data = await resp.json() as { latest_version?: string };
+    if (data.latest_version && data.latest_version !== VERSION) return data.latest_version;
     return null;
   } catch {
     return null;
@@ -600,9 +628,13 @@ async function cmdLogin(): Promise<void> {
     const loginUrl = body.data.login_url;
 
     // Open in default browser
-    const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
     try {
-      execSync(`${openCmd} "${loginUrl}"`, { stdio: "pipe" });
+      if (process.platform === "win32") {
+        execSync(`start "" "${loginUrl}"`, { stdio: "pipe" });
+      } else {
+        const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+        execSync(`${openCmd} "${loginUrl}"`, { stdio: "pipe" });
+      }
       console.log(" ✓\n");
     } catch {
       console.log(` ✓\n\n  Open this URL in your browser:\n  ${loginUrl}\n`);
@@ -882,16 +914,29 @@ async function cmdDaemon(): Promise<void> {
 function killOtherDaemons(): void {
   const myPid = process.pid;
   try {
-    const output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
-    const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== myPid);
-    for (const pid of pids) {
-      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
-    }
-    if (pids.length > 0) {
-      console.log(`[daemon] Killed ${pids.length} stale daemon process(es).`);
+    let output: string;
+    if (process.platform === "win32") {
+      // Windows: use WMIC to find overlap daemon processes
+      output = execSync('wmic process where "CommandLine like \'%overlap%daemon%\'" get ProcessId /format:list', { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+      const pids = output.match(/ProcessId=(\d+)/g)?.map((m) => parseInt(m.split("=")[1], 10)).filter((p) => !isNaN(p) && p !== myPid) ?? [];
+      for (const pid of pids) {
+        try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+      }
+      if (pids.length > 0) {
+        console.log(`[daemon] Killed ${pids.length} stale daemon process(es).`);
+      }
+    } else {
+      output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+      const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== myPid);
+      for (const pid of pids) {
+        try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+      }
+      if (pids.length > 0) {
+        console.log(`[daemon] Killed ${pids.length} stale daemon process(es).`);
+      }
     }
   } catch {
-    // pgrep returns non-zero if no matches — that's fine
+    // pgrep/wmic returns non-zero if no matches — that's fine
   }
 }
 
@@ -936,7 +981,7 @@ async function cmdUninstall(): Promise<void> {
   if (!removeBinary(binaryPath)) {
     console.log(`\n  Note: Could not auto-remove the binary at ${binaryPath}`);
     console.log("  Remove it manually:");
-    console.log(`    rm "${binaryPath}"`);
+    console.log(process.platform === "win32" ? `    del "${binaryPath}"` : `    rm "${binaryPath}"`);
   }
 
   console.log("\n  Overlap tracer has been uninstalled.\n");
@@ -967,12 +1012,26 @@ function startDaemonBackground(): void {
   const execPath = process.execPath;
   const logsDir = join(homedir(), ".overlap", "logs");
 
-  // Use nohup via shell — Bun-compiled binaries don't reliably
-  // self-fork with Node's spawn({ detached: true }).
-  const child = spawn("sh", ["-c", `nohup "${execPath}" daemon >> "${logsDir}/tracer.log" 2>> "${logsDir}/tracer.error.log" &`], {
-    stdio: "ignore",
-  });
-  child.unref();
+  if (process.platform === "win32") {
+    // Windows: use PowerShell Start-Process for detached launch with log redirection
+    const logFile = join(logsDir, "tracer.log");
+    const errFile = join(logsDir, "tracer.error.log");
+    const child = spawn("powershell.exe", [
+      "-NoProfile", "-Command",
+      `Start-Process -FilePath '${execPath}' -ArgumentList 'daemon' -WindowStyle Hidden -RedirectStandardOutput '${logFile}' -RedirectStandardError '${errFile}'`,
+    ], {
+      stdio: "ignore",
+      detached: true,
+    });
+    child.unref();
+  } else {
+    // Unix: use nohup via shell — Bun-compiled binaries don't reliably
+    // self-fork with Node's spawn({ detached: true }).
+    const child = spawn("sh", ["-c", `nohup "${execPath}" daemon >> "${logsDir}/tracer.log" 2>> "${logsDir}/tracer.error.log" &`], {
+      stdio: "ignore",
+    });
+    child.unref();
+  }
 }
 
 async function cmdUpdate(): Promise<void> {
@@ -987,9 +1046,10 @@ async function cmdUpdate(): Promise<void> {
   console.log(`\n  Update available: v${VERSION} → v${latest}\n`);
 
   // Detect platform
-  const os = process.platform === "darwin" ? "darwin" : "linux";
+  const isWindows = process.platform === "win32";
+  const os = process.platform === "darwin" ? "darwin" : isWindows ? "windows" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  const assetName = `overlap-${os}-${arch}`;
+  const assetName = isWindows ? `overlap-${os}-${arch}.exe` : `overlap-${os}-${arch}`;
   const downloadUrl = `https://github.com/${REPO}/releases/download/v${latest}/${assetName}`;
 
   // Determine install location (where this binary lives)
@@ -1001,7 +1061,9 @@ async function cmdUpdate(): Promise<void> {
     const resp = await fetch(downloadUrl, { signal: AbortSignal.timeout(30000) });
     if (!resp.ok) {
       console.log(` ✗\n  Download failed: HTTP ${resp.status}`);
-      console.log(`  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
+      console.log(isWindows
+        ? `  Try manually: npm install -g overlapdev\n`
+        : `  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
       return;
     }
 
@@ -1011,8 +1073,16 @@ async function cmdUpdate(): Promise<void> {
     const tmpPath = `${currentBinary}.tmp`;
     writeFileSync(tmpPath, buffer, { mode: 0o755 });
 
-    // Atomic replace
-    renameSync(tmpPath, currentBinary);
+    if (isWindows) {
+      // Windows can't rename over a running binary — move current to .old first
+      const oldPath = `${currentBinary}.old`;
+      try { unlinkSync(oldPath); } catch { /* no previous .old */ }
+      renameSync(currentBinary, oldPath);
+      renameSync(tmpPath, currentBinary);
+    } else {
+      // Unix: atomic replace works fine
+      renameSync(tmpPath, currentBinary);
+    }
 
     console.log(` ✓`);
 
@@ -1038,7 +1108,9 @@ async function cmdUpdate(): Promise<void> {
     console.log(`\n  ✓ Updated to v${latest}\n`);
   } catch (err) {
     console.log(` ✗\n  Error: ${err instanceof Error ? err.message : err}`);
-    console.log(`  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
+    console.log(isWindows
+      ? `  Try manually: npx @nicepkg/gkd@latest overlap\n`
+      : `  Try manually: curl -fsSL https://overlap.dev/install.sh | sh\n`);
   }
 }
 

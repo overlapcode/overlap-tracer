@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, existsSync } from "fs";
-import { basename, resolve, relative } from "path";
+import { basename, resolve, relative, normalize } from "path";
 import { execSync } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
@@ -154,7 +154,7 @@ export async function cmdCheck(): Promise<void> {
   // Normalize file path to git-root-relative
   const gitRoot = gitInfo?.gitRoot || cwd;
   const absFilePath = resolve(cwd, filePath);
-  const relPath = relative(gitRoot, absFilePath);
+  const relPath = relative(gitRoot, absFilePath).replaceAll("\\", "/");
 
   // File is outside the repo — nothing to check
   if (relPath.startsWith("..")) {
@@ -553,13 +553,13 @@ function parseCheckArgs(args: string[]): CheckFlags {
  */
 function getGitInfo(cwd: string): GitInfo | null {
   try {
-    const gitRoot = execSync("git rev-parse --show-toplevel", {
+    const gitRoot = normalize(execSync("git rev-parse --show-toplevel", {
       cwd,
       timeout: 3000,
       stdio: ["pipe", "pipe", "pipe"],
     })
       .toString()
-      .trim();
+      .trim());
 
     // Get remote URL (single call, may not exist)
     let remoteUrl = "";

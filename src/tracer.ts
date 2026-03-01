@@ -1,6 +1,6 @@
 import { watch, readFileSync, existsSync, statSync, writeFileSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
-import { join, dirname, basename } from "path";
+import { join, dirname, basename, sep, normalize } from "path";
 import { homedir } from "os";
 import { readdirSync } from "fs";
 import type { Config, IngestEvent, SessionParserState, State, TrackedFile, GitRemoteEntry } from "./types";
@@ -19,6 +19,8 @@ import type { Cache } from "./types";
 
 const PID_PATH = join(homedir(), ".overlap", "tracer.pid");
 const RELOAD_FLAG_PATH = join(homedir(), ".overlap", "reload");
+// Keep in sync with index.ts VERSION and package.json
+const TRACER_VERSION = "1.7.4";
 
 export class Tracer {
   private config: Config;
@@ -109,6 +111,29 @@ export class Tracer {
     }
 
     console.log(`[tracer] Running (PID ${process.pid}), watching ${this.adapters.length} agent(s).`);
+
+    // Ping Overlap Cloud on startup (non-blocking, fire-and-forget)
+    this.pingCloud().catch(() => {});
+  }
+
+  private async pingCloud(): Promise<void> {
+    const teamUrl = this.config.teams?.[0]?.instance_url ?? "unknown";
+    const token = this.config.teams?.[0]?.user_token ?? "unknown";
+    const instanceHash = new Bun.CryptoHasher("sha256").update(teamUrl).digest("hex").slice(0, 16);
+    const memberHash = new Bun.CryptoHasher("sha256").update(token).digest("hex").slice(0, 16);
+
+    await fetch("https://overlap.dev/api/v1/ping", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: TRACER_VERSION,
+        os: process.platform,
+        arch: process.arch,
+        instance_hash: instanceHash,
+        member_hash: memberHash,
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
   }
 
   async reloadConfig(): Promise<void> {
@@ -367,7 +392,7 @@ export class Tracer {
 
     if (!newContent) return;
 
-    const lines = newContent.split("\n");
+    const lines = newContent.split(/\r?\n/);
 
     // If this is a new file (no tracked entry), extract cwd from init line first
     if (!tracked) {
@@ -457,10 +482,13 @@ export class Tracer {
         // Strip file paths relative to the repo subdirectory if applicable
         if (subDirMap && event.file_path) {
           // Find which subDir this file is under
-          const cwdPrefix = tracked!.cwd!.endsWith("/") ? tracked!.cwd! : tracked!.cwd! + "/";
+          const normCwd = normalize(tracked!.cwd!);
+          const cwdPrefix = normCwd.endsWith(sep) ? normCwd : normCwd + sep;
+          const normFilePath = normalize(event.file_path);
           for (const [subDir, repo] of subDirMap) {
-            if (repo === eventRepoName && event.file_path.startsWith(cwdPrefix + subDir + "/")) {
-              event.file_path = event.file_path.slice((cwdPrefix + subDir + "/").length);
+            const subPrefix = cwdPrefix + subDir + sep;
+            if (repo === eventRepoName && normFilePath.startsWith(subPrefix)) {
+              event.file_path = normFilePath.slice(subPrefix.length).replaceAll("\\", "/");
               break;
             }
           }
@@ -530,7 +558,7 @@ export class Tracer {
           const sessionId = adapter.extractSessionId(filePath);
 
           const content = readFileSync(filePath, "utf-8");
-          const lines = content.split("\n");
+          const lines = content.split(/\r?\n/);
 
           let cwd: string | null = null;
           for (const line of lines) {
@@ -609,14 +637,19 @@ export function getDaemonPid(): number | null {
     return pid;
   } catch { /* PID file missing or stale */ }
 
-  // Fallback: find daemon via pgrep (handles missing PID file from race conditions)
+  // Fallback: find daemon via process search (handles missing PID file from race conditions)
   try {
-    const output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
-    const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== process.pid);
-    if (pids.length > 0) {
-      return pids[0];
+    let output: string;
+    if (process.platform === "win32") {
+      output = execSync('wmic process where "CommandLine like \'%overlap%daemon%\'" get ProcessId /format:list', { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+      const pids = output.match(/ProcessId=(\d+)/g)?.map((m) => parseInt(m.split("=")[1], 10)).filter((p) => !isNaN(p) && p !== process.pid) ?? [];
+      if (pids.length > 0) return pids[0];
+    } else {
+      output = execSync("pgrep -f 'overlap daemon'", { stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+      const pids = output.split("\n").map((p) => parseInt(p, 10)).filter((p) => !isNaN(p) && p !== process.pid);
+      if (pids.length > 0) return pids[0];
     }
-  } catch { /* pgrep returns non-zero if no matches */ }
+  } catch { /* no matches found */ }
 
   return null;
 }
