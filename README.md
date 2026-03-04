@@ -22,7 +22,7 @@ Developer uses Claude Code → writes JSONL session logs
                               Overlap dashboard
 ```
 
-The tracer extracts **signals, not code**. File contents, assistant responses, and thinking blocks never leave your machine. See [Privacy](#privacy) for the full breakdown.
+The tracer extracts **signals, not code**. File contents and tool outputs never leave your machine. Session metadata, prompts, and assistant responses are sent to your self-hosted Overlap instance. See [Privacy](#privacy) for the full breakdown.
 
 ## Install
 
@@ -120,18 +120,49 @@ The tracer is built on an agent adapter system — each agent gets its own parse
 
 ## Privacy
 
-| Sent to your team's Overlap instance | Stays on your machine |
-|--------------------------------------|----------------------|
-| Session ID, timestamps | Assistant response text |
-| Agent type, version | File contents |
-| File paths (relative, stripped of home dir) | Tool outputs / results |
-| Tool names (Write, Edit, Bash, etc.) | Thinking blocks |
-| User prompts | Full absolute paths |
-| Git branch name | API keys, env vars |
-| Cost, tokens, duration | System environment variables |
-| Model name | |
-| Bash commands | |
-| Hostname | |
+Overlap has three data zones:
+
+### Stays on your machine
+
+These are never sent anywhere — not to your instance, not to overlap.dev:
+
+- File contents (source code, diffs, file bodies)
+- Tool outputs / results
+- Full absolute paths (paths are stripped to relative before sending)
+- API keys, env vars, system environment variables
+
+### Sent to your self-hosted instance
+
+Sent to the Overlap dashboard you deployed on your own Cloudflare account:
+
+- Session ID, timestamps, status
+- Agent type, version, model name
+- File paths (relative, home directory stripped)
+- Tool names (Write, Edit, Bash, etc.)
+- User prompts
+- Assistant response text
+- Thinking blocks
+- Git branch name
+- Cost, tokens, duration
+- Bash commands
+- Hostname
+
+Your instance is under your control — you own the Cloudflare account, the D1 database, and the encryption keys.
+
+### Anonymous telemetry to overlap.dev
+
+On startup and periodically, lightweight pings are sent to `overlap.dev` for version checks and anonymous usage stats:
+
+| Data | Purpose |
+|------|---------|
+| Hashed instance URL | Anonymous instance counting |
+| Hashed user token | Anonymous user counting |
+| Tracer/dashboard version | Update notifications |
+| OS, architecture | Platform analytics |
+| User count, repo count | Aggregate usage (heartbeat only) |
+| Overlap/warn/block counts | Feature adoption (heartbeat only) |
+
+No session content, file paths, prompts, or response text is sent to overlap.dev. All identifiers are SHA-256 hashed and truncated. To opt out, block `overlap.dev` at the network level.
 
 ## Configuration
 
