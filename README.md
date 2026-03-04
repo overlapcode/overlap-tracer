@@ -65,8 +65,11 @@ overlap status
 
 ```bash
 overlap join        # Join a team (prompts for instance URL + token)
+overlap login       # Open dashboard in browser
 overlap check       # Check for team overlaps (used by Claude Code hook)
 overlap status      # Show tracer status, teams, and tracked repos
+overlap update      # Update to the latest version
+overlap backfill    # Re-sync all sessions (optionally for one team)
 overlap leave       # Leave a team
 overlap start       # Start the tracer daemon
 overlap stop        # Stop the tracer daemon
@@ -82,7 +85,7 @@ overlap version     # Show version
 
 2. **The daemon watches `~/.claude/projects/`** for JSONL session files. When you start a Claude Code session in a repo that matches your team's registered repos, the tracer starts tailing the session file.
 
-3. **Events are extracted, enriched, and batched** — session starts, file operations (with line ranges and function names), prompts, and session ends are parsed from JSONL lines, batched (every 2s or 50 events), and sent to your team's Overlap instance via `POST /api/v1/ingest`.
+3. **Events are extracted, enriched, and batched** — session starts, file operations (with line ranges and function names), prompts, and session ends are parsed from JSONL lines, batched (every 2s or 100 events), and sent to your team's Overlap instance via `POST /api/v1/ingest`.
 
 4. **The daemon polls for team state** — every 30 seconds, the daemon fetches active sessions from your team's instance and caches them locally at `~/.overlap/team-state.json`. This powers the real-time coordination hook.
 
