@@ -20,7 +20,7 @@ import type { Cache } from "./types";
 const PID_PATH = join(homedir(), ".overlap", "tracer.pid");
 const RELOAD_FLAG_PATH = join(homedir(), ".overlap", "reload");
 // Keep in sync with index.ts VERSION and package.json
-const TRACER_VERSION = "1.7.4";
+const TRACER_VERSION = "1.7.5";
 
 export class Tracer {
   private config: Config;

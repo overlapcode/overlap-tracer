@@ -57,10 +57,18 @@ export function parseClaudeCodeLine(
   if (parsed.cwd && typeof parsed.cwd === "string" && !sessionState._cwd) {
     sessionState._cwd = parsed.cwd;
   }
-  // Model appears on assistant message lines at message.model
+  // Model and usage appear on assistant message lines at message.model / message.usage
   const msgForModel = parsed.message as Record<string, unknown> | undefined;
   if (msgForModel?.model && typeof msgForModel.model === "string" && !sessionState._model) {
     sessionState._model = msgForModel.model;
+  }
+  // Accumulate per-message token usage (usage appears on every assistant response)
+  const msgUsage = msgForModel?.usage as Record<string, number> | undefined;
+  if (msgUsage) {
+    sessionState._totalInputTokens = (sessionState._totalInputTokens ?? 0) + (msgUsage.input_tokens ?? 0);
+    sessionState._totalOutputTokens = (sessionState._totalOutputTokens ?? 0) + (msgUsage.output_tokens ?? 0);
+    sessionState._cacheCreationTokens = (sessionState._cacheCreationTokens ?? 0) + (msgUsage.cache_creation_input_tokens ?? 0);
+    sessionState._cacheReadTokens = (sessionState._cacheReadTokens ?? 0) + (msgUsage.cache_read_input_tokens ?? 0);
   }
 
   // First line with cwd + sessionId → session_start (Claude Code has no system/init line)
@@ -134,6 +142,14 @@ export function parseClaudeCodeLine(
 
   const message = parsed.message as Record<string, unknown> | undefined;
 
+  // Running token totals — included on every event so the server always has latest counts
+  const tokenTotals = {
+    total_input_tokens: sessionState._totalInputTokens,
+    total_output_tokens: sessionState._totalOutputTokens,
+    cache_creation_tokens: sessionState._cacheCreationTokens,
+    cache_read_tokens: sessionState._cacheReadTokens,
+  };
+
   // User message → prompt
   if (message?.role === "user") {
     const promptText = extractUserPromptText(message.content);
@@ -146,6 +162,7 @@ export function parseClaudeCodeLine(
         timestamp: (parsed.timestamp as string) || new Date().toISOString(),
         prompt_text: promptText,
         turn_number: sessionState.turnNumber,
+        ...tokenTotals,
         repo_name: "",
         user_id: "",
       }];
@@ -165,6 +182,7 @@ export function parseClaudeCodeLine(
           response_text: block.text,
           response_type: "text",
           turn_number: sessionState.turnNumber,
+          ...tokenTotals,
           repo_name: "",
           user_id: "",
         });
@@ -177,18 +195,26 @@ export function parseClaudeCodeLine(
           response_text: block.thinking,
           response_type: "thinking",
           turn_number: sessionState.turnNumber,
+          ...tokenTotals,
           repo_name: "",
           user_id: "",
         });
       } else if (block.type === "tool_use") {
         const event = extractFileOp(block, parsed, sessionId, sessionState);
-        if (event) events.push(event);
+        if (event) {
+          // Attach token totals to file_op events too
+          event.total_input_tokens = sessionState._totalInputTokens;
+          event.total_output_tokens = sessionState._totalOutputTokens;
+          event.cache_creation_tokens = sessionState._cacheCreationTokens;
+          event.cache_read_tokens = sessionState._cacheReadTokens;
+          events.push(event);
+        }
       }
     }
     return events;
   }
 
-  // Result → session_end
+  // Result → session_end (uses accumulated tokens since per-line usage is more reliable)
   if (parsed.type === "result") {
     const usage = parsed.usage as Record<string, unknown> | undefined;
     return [...backfillEvents, {
@@ -199,10 +225,10 @@ export function parseClaudeCodeLine(
       total_cost_usd: parsed.total_cost_usd as number | undefined,
       duration_ms: parsed.duration_ms as number | undefined,
       num_turns: parsed.num_turns as number | undefined,
-      total_input_tokens: usage?.input_tokens as number | undefined,
-      total_output_tokens: usage?.output_tokens as number | undefined,
-      cache_creation_tokens: usage?.cache_creation_input_tokens as number | undefined,
-      cache_read_tokens: usage?.cache_read_input_tokens as number | undefined,
+      total_input_tokens: sessionState._totalInputTokens ?? (usage?.input_tokens as number | undefined),
+      total_output_tokens: sessionState._totalOutputTokens ?? (usage?.output_tokens as number | undefined),
+      cache_creation_tokens: sessionState._cacheCreationTokens ?? (usage?.cache_creation_input_tokens as number | undefined),
+      cache_read_tokens: sessionState._cacheReadTokens ?? (usage?.cache_read_input_tokens as number | undefined),
       result_summary: parsed.result as string | undefined,
       files_touched: [...sessionState.filesTouched],
       repo_name: "",

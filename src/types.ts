@@ -124,6 +124,11 @@ export type SessionParserState = {
   _branchUpdateEmitted?: boolean;
   _model?: string;
   _modelUpdateEmitted?: boolean;
+  // Accumulated token usage from per-message usage blocks
+  _totalInputTokens?: number;
+  _totalOutputTokens?: number;
+  _cacheCreationTokens?: number;
+  _cacheReadTokens?: number;
 };
 
 // ── Team State (polled from instance, cached locally) ────────────────────
